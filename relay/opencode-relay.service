@@ -1,0 +1,47 @@
+[Unit]
+Description=OpenCode Relay (Passkey pairing and scoped device access)
+Documentation=https://github.com/your-org/opencode-relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/opencode-relay
+ExecStart=/usr/bin/node /opt/opencode-relay/relay.mjs
+Restart=always
+RestartSec=5
+
+# ── Configuration ──
+Environment=NODE_ENV=production
+Environment=RELAY_PORT=4097
+Environment=OC_PORT=4096
+Environment=TOKENS_PATH=/etc/opencode-relay/tokens.json
+Environment=TOKEN_RELOAD_SEC=60
+Environment=PASSKEY_STATE_PATH=/etc/opencode-relay/passkeys.json
+Environment=FRPS_CONFIG_PATH=/etc/frp/frps.toml
+Environment=MACHINE_REMOTE_PORT_MIN=4100
+Environment=MACHINE_REMOTE_PORT_MAX=4199
+EnvironmentFile=-/etc/opencode-relay/relay.env
+UMask=0077
+TimeoutStopSec=30s
+
+# ── Logging ──
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=opencode-relay
+
+# ── Security hardening ──
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/etc/opencode-relay
+ReadOnlyPaths=/opt/opencode-relay /etc/frp/frps.toml
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictRealtime=yes
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

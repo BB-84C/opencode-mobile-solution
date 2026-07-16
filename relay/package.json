@@ -1,0 +1,16 @@
+{
+  "name": "opencode-relay",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:all": "node --test test/**/*.test.mjs"
+  },
+  "dependencies": {
+    "@simplewebauthn/server": "^13.3.2",
+    "qrcode": "^1.5.4"
+  }
+}

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1024"
+  height="1024"
+  viewBox="0 0 1024 1024"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">OpenCode Mobile</title>
+  <desc id="description">An open peach letter O joined by a violet relay cursor on a black field.</desc>
+
+  <!-- iOS applies the final icon mask; keep the artwork full-bleed and opaque. -->
+  <rect width="1024" height="1024" fill="#0A0A0A" />
+
+  <!--
+    A deliberately open, rounded-square O: recognizable as OpenCode without
+    reproducing its desktop mark. The contrasting link reads as both a cursor
+    and the relay connection that closes the circuit.
+  -->
+  <path
+    d="M500 756H380C318 756 268 706 268 644V380C268 318 318 268 380 268H644C706 268 756 318 756 380V644C756 706 706 756 644 756H630"
+    fill="none"
+    stroke="#FAB283"
+    stroke-width="104"
+    stroke-linecap="butt"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M536 756H594"
+    fill="none"
+    stroke="#9D7CD8"
+    stroke-width="72"
+    stroke-linecap="round"
+  />
+</svg>

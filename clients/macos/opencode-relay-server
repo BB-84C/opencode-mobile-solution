@@ -1,0 +1,203 @@
+#!/bin/zsh
+
+# Product-level relay orchestration. The original, ownership-safe backend
+# controller remains in opencode-relay-server-core and is never bypassed.
+
+setopt pipe_fail
+
+CORE="$HOME/.local/bin/opencode-relay-server-core"
+TUNNEL="$HOME/.local/bin/opencode-frp-tunnel"
+AGENT="$HOME/.local/bin/opencode-machine-agent"
+AUTH_MODULE="$HOME/.local/lib/opencode-relay/opencode-machine-auth.mjs"
+
+[[ -x "$CORE" ]] || { print -u2 -- 'OpenCode relay backend core is missing.'; exit 10; }
+
+case "${1:-}" in
+  __register|__unregister) exec "$CORE" "$@" ;;
+esac
+
+source "$HOME/.local/lib/opencode-relay/common.sh" || exit 10
+relay_load_config || exit $?
+
+action="${1:-status}"
+shift $(( $# > 0 ? 1 : 0 ))
+
+machine_auth() {
+  OPENCODE_SERVER_USERNAME="$OPENCODE_SERVER_USERNAME" \
+    OPENCODE_SERVER_PASSWORD="$OPENCODE_SERVER_PASSWORD" \
+    "$RELAY_NODE" "$AUTH_MODULE" "$@"
+}
+
+if [[ "$action" == rename ]]; then
+  rename_json=false
+  typeset -a name_parts
+  for argument in "$@"; do
+    if [[ "$argument" == --json ]]; then rename_json=true; else name_parts+=("$argument"); fi
+  done
+  (( ${#name_parts[@]} > 0 )) || { print -u2 -- 'rename requires a machine name.'; exit 10; }
+  result=$(machine_auth rename "${name_parts[@]}") || exit $?
+  if $rename_json; then
+    print -r -- "$result"
+  else
+    print -r -- "Machine name: $(jq -r '.Machine.displayName' <<< "$result")"
+  fi
+  exit 0
+fi
+
+target="all"
+json=false
+for argument in "$@"; do
+  case "$argument" in
+    backend|tunnel) target="$argument" ;;
+    --json) json=true ;;
+    *) print -u2 -- "Unsupported relay argument: $argument"; exit 10 ;;
+  esac
+done
+
+case "$action" in
+  start|status|restart|stop|doctor) ;;
+  *) print -u2 -- "Unsupported relay action: $action"; exit 10 ;;
+esac
+
+if [[ "$target" == backend ]]; then
+  if $json; then exec "$CORE" "$action" backend --json; else exec "$CORE" "$action" backend; fi
+fi
+
+component_json() {
+  local command="$1" component_action="$2" fallback="$3" result
+  result=$("$command" "$component_action" --json 2>/dev/null) || true
+  jq -e . >/dev/null 2>&1 <<< "$result" && print -r -- "$result" || print -r -- "$fallback"
+}
+
+status_json() {
+  local backend tunnel agent machine state
+  backend=$(component_json "$CORE" status '{"State":"Error"}')
+  tunnel=$(component_json "$TUNNEL" status '{"Status":"Error"}')
+  agent=$(component_json "$AGENT" status '{"Status":"Error"}')
+  machine=$(machine_auth status 2>/dev/null) || true
+  jq -e . >/dev/null 2>&1 <<< "$machine" || machine='{"Status":"Unavailable","Machine":null}'
+  state=$(jq -nr --arg backend "$(jq -r '.State // "Error"' <<< "$backend")" \
+    --arg tunnel "$(jq -r '.Status // "Error"' <<< "$tunnel")" \
+    --arg agent "$(jq -r '.Status // "Error"' <<< "$agent")" \
+    --arg machine "$(jq -r '.Status // "Unavailable"' <<< "$machine")" \
+    'if $backend == "Ready" and $tunnel == "Running" and $agent == "Running" and $machine == "Authorized" then "Ready" elif $backend == "Stopped" and $tunnel == "Stopped" and $agent == "Stopped" then "Stopped" else "Degraded" end')
+  jq -cn --arg State "$state" --argjson Backend "$backend" --argjson Tunnel "$tunnel" --argjson Agent "$agent" --argjson Machine "$machine" \
+    '{State:$State,Backend:$Backend,Tunnel:$Tunnel,HeartbeatAgent:$Agent,MachineAuthorization:$Machine}'
+}
+
+emit_status() {
+  local result="$1"
+  if $json; then
+    print -r -- "$result"
+  else
+    print -r -- "State: $(jq -r '.State' <<< "$result")"
+    print -r -- "Machine authorization: $(jq -r '.MachineAuthorization.Status // "Unavailable"' <<< "$result")"
+    print -r -- "Tunnel: $(jq -r '.Tunnel.Status // "Unavailable"' <<< "$result")"
+    print -r -- "Heartbeat: $(jq -r '.HeartbeatAgent.Status // "Unavailable"' <<< "$result")"
+    local target_id
+    target_id=$(jq -r '.MachineAuthorization.Machine.targetID // empty' <<< "$result")
+    [[ -n "$target_id" ]] && print -r -- "Relay target: $target_id"
+    local display_name
+    display_name=$(jq -r '.MachineAuthorization.Machine.displayName // empty' <<< "$result")
+    [[ -n "$display_name" ]] && print -r -- "Machine name: $display_name"
+  fi
+  case "$(jq -r '.State' <<< "$result")" in
+    Ready) return 0 ;;
+    Stopped) return 3 ;;
+    *) return 7 ;;
+  esac
+}
+
+tunnel_target_json() {
+  local tunnel agent machine state
+  tunnel=$(component_json "$TUNNEL" status '{"Status":"Error"}')
+  agent=$(component_json "$AGENT" status '{"Status":"Error"}')
+  machine=$(machine_auth status 2>/dev/null) || true
+  jq -e . >/dev/null 2>&1 <<< "$machine" || machine='{"Status":"Unavailable","Machine":null}'
+  state=$(jq -nr --arg tunnel "$(jq -r '.Status // "Error"' <<< "$tunnel")" \
+    --arg agent "$(jq -r '.Status // "Error"' <<< "$agent")" \
+    --arg machine "$(jq -r '.Status // "Unavailable"' <<< "$machine")" \
+    'if $tunnel == "Running" and $agent == "Running" and $machine == "Authorized" then "Ready" elif $tunnel == "Stopped" and $agent == "Stopped" then "Stopped" else "Degraded" end')
+  jq -cn --arg Status "$state" --argjson Tunnel "$tunnel" --argjson Agent "$agent" --argjson Machine "$machine" \
+    '{Status:$Status,Tunnel:$Tunnel,HeartbeatAgent:$Agent,MachineAuthorization:$Machine}'
+}
+
+emit_tunnel_target() {
+  local result="$1" mutation="${2:-false}"
+  if $json; then
+    print -r -- "$result"
+  else
+    print -r -- "Status: $(jq -r '.Status' <<< "$result")"
+    print -r -- "Tunnel: $(jq -r '.Tunnel.Status // "Unavailable"' <<< "$result")"
+    print -r -- "Heartbeat: $(jq -r '.HeartbeatAgent.Status // "Unavailable"' <<< "$result")"
+  fi
+  case "$(jq -r '.Status' <<< "$result")" in
+    Ready) return 0 ;;
+    Stopped) $mutation && return 0 || return 3 ;;
+    *) return 7 ;;
+  esac
+}
+
+ensure_authorized() {
+  [[ -f "$AUTH_MODULE" ]] || { print -u2 -- 'Machine authorization client is missing.'; return 10; }
+  machine_auth ensure >/dev/null
+}
+
+if [[ "$target" == tunnel ]]; then
+  case "$action" in
+    start|restart)
+      ensure_authorized || exit $?
+      "$TUNNEL" "$action" --json >/dev/null || exit $?
+      "$AGENT" "$action" --json >/dev/null || exit $?
+      ;;
+    stop)
+      "$AGENT" stop --json >/dev/null 2>&1 || true
+      "$TUNNEL" stop --json >/dev/null 2>&1 || true
+      ;;
+    status|doctor) ;;
+  esac
+  result=$(tunnel_target_json)
+  mutation=false
+  [[ "$action" == start || "$action" == restart || "$action" == stop ]] && mutation=true
+  emit_tunnel_target "$result" "$mutation"
+  exit $?
+fi
+
+case "$action" in
+  status)
+    result=$(status_json)
+    emit_status "$result"
+    exit $?
+    ;;
+  doctor)
+    result=$(status_json)
+    core_doctor=$(component_json "$CORE" doctor '{}')
+    result=$(jq -cn --argjson status "$result" --argjson doctor "$core_doctor" '$status + {BackendDoctor:$doctor}')
+    emit_status "$result"
+    exit $?
+    ;;
+  stop)
+    # Stop is convergent: attempt every component even if one reports an error,
+    # then trust the observed final state. Never print Stopped while a process
+    # remains alive. The persistent machine credential is intentionally kept.
+    "$AGENT" stop --json >/dev/null 2>&1 || true
+    "$TUNNEL" stop --json >/dev/null 2>&1 || true
+    "$CORE" stop backend --json >/dev/null 2>&1 || true
+    result=$(status_json)
+    if [[ "$(jq -r '.State' <<< "$result")" == Stopped ]]; then
+      if $json; then print -r -- "$result"; else print -r -- 'State: Stopped'; fi
+      exit 0
+    fi
+    emit_status "$result"
+    exit 7
+    ;;
+  start|restart)
+    ensure_authorized || exit $?
+    "$CORE" "$action" backend --json >/dev/null || exit $?
+    "$TUNNEL" "$action" --json >/dev/null || exit $?
+    "$AGENT" "$action" --json >/dev/null || exit $?
+    result=$(status_json)
+    emit_status "$result"
+    exit $?
+    ;;
+esac

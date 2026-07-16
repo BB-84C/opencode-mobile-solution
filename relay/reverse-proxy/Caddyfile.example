@@ -1,0 +1,19 @@
+# OpenCode relay reverse proxy (Caddy).
+# Replace opencode.example.com with your own hostname.
+opencode.example.com {
+    # Caddy issues a certificate automatically for a public hostname.
+    # To use your own certificate instead, uncomment:
+    # tls /etc/caddy/certs/your.pem /etc/caddy/certs/your.key
+
+    # flush_interval -1 disables response buffering so prompt streaming and
+    # SSE event streams are delivered without delay.
+    reverse_proxy 127.0.0.1:4097 {
+        flush_interval -1
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        -Server
+    }
+}

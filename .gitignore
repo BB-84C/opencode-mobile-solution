@@ -1,0 +1,32 @@
+# dependencies
+node_modules/
+
+# secrets & live credentials — NEVER commit these
+.env
+*.env
+relay/tokens.json
+**/machine.json
+**/passkeys.json
+**/frpc.toml
+*.pem
+*.key
+secrets/
+.reports/
+
+# runtime state / logs
+.run/
+*.log
+
+# expo / app build output
+app/.expo/
+app/.cache/
+app/artifacts/
+app/dist/
+app/web-build/
+app/ios/
+app/android/
+app/expo-env.d.ts
+
+# os cruft
+.DS_Store
+Thumbs.db

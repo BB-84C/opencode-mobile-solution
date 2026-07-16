@@ -1,0 +1,18 @@
+{
+  "tokens": {
+    "my-iphone": {
+      "token": "REPLACE_WITH_64_CHAR_HEX_OR_UUID",
+      "name": "My iPhone",
+      "basic_user": "opencode",
+      "basic_pass": "REPLACE_WITH_OPENCODE_SERVER_PASSWORD",
+      "directory": null
+    },
+    "my-android": {
+      "token": "REPLACE_WITH_64_CHAR_HEX_OR_UUID",
+      "name": "My Android",
+      "basic_user": "opencode",
+      "basic_pass": "REPLACE_WITH_OPENCODE_SERVER_PASSWORD",
+      "directory": null
+    }
+  }
+}

@@ -997,6 +997,16 @@ export function createPasskeyPairing({
     sendJson(res, 200, { renamed: true, machine: renamed });
   }
 
+  async function revokeOwnMachine(req, res) {
+    rateLimit(req, 'machine-revoke-self', 12);
+    const machine = requireMachine(req);
+    if (!store.revokeMachine(machine.machineID)) {
+      throw new HttpError(404, 'Machine was not found or is already revoked', 'machine_not_found');
+    }
+    onMachineRevoked(machine);
+    sendJson(res, 200, { revoked: true });
+  }
+
   async function renameMachine(req, res) {
     requireSameOrigin(req);
     requireAuthenticated(req);
@@ -1069,6 +1079,10 @@ export function createPasskeyPairing({
       }
       if (route === 'GET /api/machine/me') {
         await machineMe(req, res);
+        return true;
+      }
+      if (route === 'DELETE /api/machine/me') {
+        await revokeOwnMachine(req, res);
         return true;
       }
       if (route === 'POST /api/machine/name') {

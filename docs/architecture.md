@@ -74,6 +74,7 @@ static token:
 | `POST /api/oauth/device/code` | rate limited | Start an authorization request. |
 | `POST /api/oauth/token` | one-time device code | Poll for approval and retrieve the machine bearer + FRP transport config once. |
 | `GET /api/machine/me` | machine bearer | Validate the persistent credential. |
+| `DELETE /api/machine/me` | machine bearer | Revoke the calling machine credential during an explicit purge. |
 | `POST /api/machine/heartbeat` | machine bearer | Report local backend health. |
 
 The CLI opens the dashboard for the owner to approve. The relay derives a

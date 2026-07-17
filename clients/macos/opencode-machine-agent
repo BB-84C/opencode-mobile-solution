@@ -1,13 +1,14 @@
 #!/bin/zsh
 
+# opencode-relay-managed-client v1
 setopt pipe_fail
-source "$HOME/.local/lib/opencode-relay/common.sh" || exit 10
+source "${OPENCODE_RELAY_LIB_DIR:-$HOME/.local/lib/opencode-relay}/common.sh" || exit 10
 relay_load_config || exit $?
 
 action="${1:-status}"
 json=false
 [[ "${2:-}" == --json ]] && json=true
-AGENT_MODULE="$HOME/.local/lib/opencode-relay/opencode-machine-agent.mjs"
+AGENT_MODULE="$RELAY_LIB_DIR/opencode-machine-agent.mjs"
 AGENT_STATE="$RELAY_STATE_ROOT/machine-agent-process.json"
 AGENT_STATUS="$RELAY_STATE_ROOT/machine-agent-status.json"
 MACHINE_CREDENTIAL="$RELAY_CONFIG_DIR/machine.json"

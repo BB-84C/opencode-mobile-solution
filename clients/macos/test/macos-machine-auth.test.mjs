@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
@@ -18,7 +19,7 @@ afterEach(async () => {
 });
 
 test('macOS OAuth client saves one-time machine credentials and generated FRP configuration', async () => {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode-machine-auth-'));
+  const home = fsSync.mkdtempSync(path.join(os.tmpdir(), 'opencode-machine-auth-'));
   cleanups.push(() => fs.rm(home, { recursive: true, force: true }));
   const accessToken = 'machine-access-token-with-more-than-thirty-two-characters';
   const requests = [];
@@ -43,11 +44,18 @@ test('macOS OAuth client saves one-time machine credentials and generated FRP co
       res.end(JSON.stringify({
         access_token: accessToken,
         machine: { machineID: 'machine-test', targetID: 'mac-test', displayName: machineName, displayNameRevision: 1, port: 4100 },
-        transport: { type: 'frp-ssh', frpToken: 'frp-test-secret', remotePort: 4100, localForwardPort: 17000 },
+        transport: {
+          type: 'frp-ssh',
+          frpServerHost: '127.0.0.1',
+          frpServerPort: 7000,
+          frpToken: 'frp-test-secret',
+          remotePort: 4100,
+          localForwardPort: 17000,
+        },
       }));
       return;
     }
-    if (req.url === '/api/machine/me' && req.headers.authorization === `Bearer ${accessToken}`) {
+    if (req.url === '/api/machine/me' && req.method === 'GET' && req.headers.authorization === `Bearer ${accessToken}`) {
       res.end(JSON.stringify({ machine: { machineID: 'machine-test', targetID: 'mac-test', displayName: machineName, displayNameRevision: machineName === 'Test Mac' ? 1 : 2, port: 4100 } }));
       return;
     }
@@ -56,11 +64,18 @@ test('macOS OAuth client saves one-time machine credentials and generated FRP co
       res.end(JSON.stringify({ renamed: true, machine: { machineID: 'machine-test', targetID: 'mac-test', displayName: machineName, displayNameRevision: 2, port: 4100 } }));
       return;
     }
+    if (req.url === '/api/machine/me' && req.method === 'DELETE' && req.headers.authorization === `Bearer ${accessToken}`) {
+      res.end(JSON.stringify({ revoked: true }));
+      return;
+    }
     res.statusCode = 404;
     res.end(JSON.stringify({ error: 'not_found' }));
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  cleanups.push(() => new Promise((resolve) => server.close(resolve)));
+  cleanups.push(() => {
+    server.closeAllConnections();
+    return new Promise((resolve) => server.close(resolve));
+  });
   const relayOrigin = `http://127.0.0.1:${server.address().port}`;
   const environment = {
     ...process.env,
@@ -69,6 +84,7 @@ test('macOS OAuth client saves one-time machine credentials and generated FRP co
     OPENCODE_MACHINE_CREDENTIAL: path.join(home, '.config', 'opencode-relay', 'machine.json'),
     OPENCODE_FRPC_CONFIG: path.join(home, '.config', 'opencode-relay', 'frpc.toml'),
     OPENCODE_RELAY_ORIGIN: relayOrigin,
+    OPENCODE_RELAY_SSH_ALIAS: 'test-vps',
     OPENCODE_RELAY_NO_OPEN: '1',
     OPENCODE_SERVER_USERNAME: 'opencode',
     OPENCODE_SERVER_PASSWORD: 'local-basic-password-with-enough-entropy',
@@ -84,6 +100,7 @@ test('macOS OAuth client saves one-time machine credentials and generated FRP co
   const credentialPath = path.join(configDirectory, 'machine.json');
   const credential = JSON.parse(await fs.readFile(credentialPath, 'utf8'));
   assert.equal(credential.accessToken, accessToken);
+  assert.equal(credential.sshAlias, 'test-vps');
   assert.equal((await fs.stat(credentialPath)).mode & 0o777, 0o600);
   const frpc = await fs.readFile(path.join(configDirectory, 'frpc.toml'), 'utf8');
   assert.match(frpc, /name = "mac-test"/);
@@ -100,4 +117,8 @@ test('macOS OAuth client saves one-time machine credentials and generated FRP co
   const renamedCredential = JSON.parse(await fs.readFile(credentialPath, 'utf8'));
   assert.equal(renamedCredential.machine.displayName, 'Studio Mac');
   assert.equal(requests.at(-1).body.displayName, 'Studio Mac');
+
+  const revoked = await execute(process.execPath, [authClient, 'revoke'], { env: environment });
+  assert.equal(JSON.parse(revoked.stdout).Status, 'Revoked');
+  assert.equal(requests.at(-1).authorization, `Bearer ${accessToken}`);
 });

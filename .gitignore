@@ -4,10 +4,13 @@ node_modules/
 # secrets & live credentials — NEVER commit these
 .env
 *.env
+**/env
 relay/tokens.json
 **/machine.json
 **/passkeys.json
 **/frpc.toml
+**/installation.json
+**/installation-id
 *.pem
 *.key
 secrets/

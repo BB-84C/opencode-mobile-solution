@@ -11,7 +11,7 @@ need.
 |------|------------|
 | **`relay/`** | A small Node service for a VPS (or any always-on host). It fronts one or more OpenCode `serve` backends, translates each device's bearer token into the backend's Basic auth, enforces per-device target/directory scope, and hosts a passkey-protected dashboard for pairing phones and authorizing machines. |
 | **`app/`** | An Expo / React Native client. It connects to a relay by scanning a pairing QR code or by entering a relay URL and credential. Rebuild it under your own bundle identifier and ship it to your own devices. |
-| **`clients/`** | The local launcher that lets `opencode` on your workstation either attach to a shared, relay-connected backend or run fully local. `clients/windows/` is a complete reference implementation; `clients/macos/` is a work-in-progress port. |
+| **`clients/`** | Local launchers that let `opencode` on a workstation either attach to a shared, relay-connected backend or run fully local. Both Windows and macOS implementations follow the same lifecycle and escape-hatch contract. |
 
 Nothing here hard-codes a server. The app has no built-in relay address; the
 relay and launcher default hostnames are `opencode.example.com` placeholders you
@@ -49,9 +49,8 @@ replace with your own.
 2. **App** — set your own identifiers in `app/app.json`, then build and run. See
    [`app/README.md`](app/README.md).
 3. **Local launcher** — install the wrapper so `opencode` attaches to the shared
-   backend. See [`clients/windows/README.md`](clients/windows/README.md)
-   (reference) or [`clients/macos/README.md`](clients/macos/README.md) (port in
-   progress).
+   backend. See [`clients/windows/README.md`](clients/windows/README.md) or
+   [`clients/macos/README.md`](clients/macos/README.md).
 
 ## Security notes
 
@@ -69,7 +68,7 @@ relay/          VPS relay service (Node), systemd unit, deploy + proxy examples
 app/            Expo / React Native client
 clients/
   windows/      relay-aware opencode wrapper (complete reference)
-  macos/        macOS port (work in progress)
+  macos/        self-contained macOS launcher, installer, controller, and tests
 docs/           architecture overview
 ```
 

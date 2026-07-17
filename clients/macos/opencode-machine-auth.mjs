@@ -10,12 +10,13 @@ const VERSION = '2';
 const home = os.homedir();
 const platformName = process.env.OPENCODE_MACHINE_PLATFORM
   || (process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : process.platform);
-const configDirectory = process.env.OPENCODE_RELAY_CONFIG_DIR || path.join(home, '.config', 'opencode-relay');
+const configDirectory = process.env.OPENCODE_RELAY_CONFIG_DIR
+  || path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'opencode-relay');
 const credentialPath = process.env.OPENCODE_MACHINE_CREDENTIAL || path.join(configDirectory, 'machine.json');
 const installationPath = path.join(configDirectory, 'installation-id');
 const frpcPath = process.env.OPENCODE_FRPC_CONFIG || path.join(configDirectory, 'frpc.toml');
-const relayOrigin = (process.env.OPENCODE_RELAY_ORIGIN || 'https://opencode.example.com').replace(/\/$/, '');
-const sshAlias = process.env.OPENCODE_RELAY_SSH_ALIAS || 'opencode-vps';
+const relayOrigin = (process.env.OPENCODE_RELAY_ORIGIN || '').replace(/\/$/, '');
+const sshAlias = process.env.OPENCODE_RELAY_SSH_ALIAS || '';
 const localPort = Number(process.env.OPENCODE_SERVER_PORT || 4096);
 const action = process.argv[2] || 'status';
 
@@ -64,6 +65,11 @@ function existingFrpcRequest() {
 }
 
 async function requestJson(pathname, { method = 'GET', token, body, timeoutMs = 10_000 } = {}) {
+  if (!/^https:\/\//.test(relayOrigin) && !/^http:\/\/127\.0\.0\.1(?::\d+)?$/.test(relayOrigin)) {
+    const error = new Error('OPENCODE_RELAY_ORIGIN must be an HTTPS origin');
+    error.exitCode = 10;
+    throw error;
+  }
   let response;
   try {
     response = await fetch(`${relayOrigin}${pathname}`, {
@@ -127,10 +133,32 @@ async function renameMachine(displayName) {
   return { Status: 'Authorized', Machine: value.machine, Reason: null };
 }
 
+async function revokeMachine() {
+  const credential = readJson(credentialPath);
+  if (!credential?.accessToken || credential.relayOrigin !== relayOrigin) {
+    return { Status: 'Unauthorized', Machine: null, Reason: 'credential_missing' };
+  }
+  const { response, value } = await requestJson('/api/machine/me', {
+    method: 'DELETE',
+    token: credential.accessToken,
+  });
+  if (response.status === 401) return { Status: 'Revoked', Machine: credential.machine ?? null, Reason: 'already_revoked' };
+  if (!response.ok) {
+    const error = new Error(value.message || value.error || `Machine revocation failed (${response.status})`);
+    error.exitCode = response.status >= 500 ? 7 : 10;
+    throw error;
+  }
+  return { Status: 'Revoked', Machine: credential.machine ?? null, Reason: null };
+}
+
 function validateIssued(value) {
   if (!value || typeof value.access_token !== 'string' || value.access_token.length < 32
       || !value.machine?.machineID || !value.machine?.targetID
+      || value.transport?.type !== 'frp-ssh'
       || !Number.isInteger(value.transport?.remotePort)
+      || !Number.isInteger(value.transport?.localForwardPort)
+      || typeof value.transport?.frpServerHost !== 'string' || !value.transport.frpServerHost
+      || !Number.isInteger(value.transport?.frpServerPort)
       || typeof value.transport?.frpToken !== 'string' || value.transport.frpToken.length < 8) {
     throw new Error('Relay returned an incomplete machine credential');
   }
@@ -155,7 +183,7 @@ function saveIssued(value) {
   atomicWrite(credentialPath, `${JSON.stringify(credential, null, 2)}\n`);
   const frpc = [
     `serverAddr = ${tomlString('127.0.0.1')}`,
-    `serverPort = ${Number(issued.transport.localForwardPort || 17000)}`,
+    `serverPort = ${issued.transport.localForwardPort}`,
     '',
     'auth.method = "token"',
     `auth.token = ${tomlString(issued.transport.frpToken)}`,
@@ -180,6 +208,11 @@ async function authorize() {
     error.exitCode = 10;
     throw error;
   }
+  if (!sshAlias) {
+    const error = new Error('OPENCODE_RELAY_SSH_ALIAS is required for FRP-over-SSH transport');
+    error.exitCode = 10;
+    throw error;
+  }
   const previous = readJson(credentialPath);
   const frpc = existingFrpcRequest();
   const displayName = process.env.OPENCODE_MACHINE_NAME || os.hostname();
@@ -193,8 +226,12 @@ async function authorize() {
       clientVersion: VERSION,
       basicUsername: username,
       basicPassword: password,
-      requestedTargetID: previous?.machine?.targetID || frpc.requestedTargetID,
-      requestedRemotePort: previous?.transport?.remotePort || frpc.requestedRemotePort,
+      requestedTargetID: previous?.machine?.targetID
+        || process.env.OPENCODE_RELAY_REQUESTED_TARGET
+        || frpc.requestedTargetID,
+      requestedRemotePort: previous?.transport?.remotePort
+        || (Number(process.env.OPENCODE_RELAY_REQUESTED_PORT) || null)
+        || frpc.requestedRemotePort,
     },
   });
   if (!response.ok) {
@@ -251,10 +288,11 @@ try {
   if (action === 'status') result = await credentialStatus();
   else if (action === 'ensure') result = await ensure();
   else if (action === 'rename') result = await renameMachine(process.argv.slice(3).join(' '));
+  else if (action === 'revoke') result = await revokeMachine();
   else throw Object.assign(new Error(`Unsupported machine auth action: ${action}`), { exitCode: 10 });
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (result.Status === 'Unauthorized') process.exitCode = 3;
-  else if (result.Status === 'Revoked') process.exitCode = 6;
+  else if (result.Status === 'Revoked' && action !== 'revoke') process.exitCode = 6;
 } catch (error) {
   process.stderr.write(`${error.message}\n`);
   process.exitCode = error.exitCode || 10;

@@ -1,7 +1,8 @@
 #!/bin/zsh
 
+# opencode-relay-managed-client v1
 setopt pipe_fail
-source "$HOME/.local/lib/opencode-relay/common.sh" || exit 10
+source "${OPENCODE_RELAY_LIB_DIR:-$HOME/.local/lib/opencode-relay}/common.sh" || exit 10
 relay_load_config || exit $?
 
 local_mode=false
@@ -56,4 +57,4 @@ export OPENCODE_CLIENT_DIRECTORY="$directory"
 export OPENCODE_CLIENT_GENERATION="$generation"
 export OPENCODE_SERVER_USERNAME
 export OPENCODE_SERVER_PASSWORD
-exec "$RELAY_NODE" "$HOME/.local/lib/opencode-relay/opencode-client-launcher.mjs" "${attach_args[@]}"
+exec "$RELAY_NODE" "$RELAY_LIB_DIR/opencode-client-launcher.mjs" "${attach_args[@]}"

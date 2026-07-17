@@ -217,9 +217,12 @@ The public machine endpoints are:
 | `POST /api/oauth/device/code` | rate limited | Start a ten-minute authorization request |
 | `POST /api/oauth/token` | one-time device code | Poll for owner approval and retrieve credentials once |
 | `GET /api/machine/me` | machine bearer | Validate the persistent machine credential |
+| `DELETE /api/machine/me` | machine bearer | Revoke the calling machine before a local credential purge |
 | `POST /api/machine/heartbeat` | machine bearer | Report local 4096 health and versions |
 
-Approve, deny, list, and revoke operations require a same-origin passkey web session.
+Approve, deny, list, and administrative revoke operations require a same-origin
+passkey web session. A machine may revoke only its own credential through the
+authenticated DELETE endpoint.
 
 ---
 

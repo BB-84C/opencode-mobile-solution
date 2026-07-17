@@ -1,0 +1,165 @@
+#!/bin/zsh
+
+# opencode-relay-managed-client v1
+setopt pipe_fail
+source "${OPENCODE_RELAY_LIB_DIR:-$HOME/.local/lib/opencode-relay}/common.sh" || exit 10
+relay_load_config || exit $?
+
+action="${1:-status}"
+json=false
+[[ "${2:-}" == --json ]] && json=true
+TUNNEL_STATE="$RELAY_STATE_ROOT/tunnel-state.json"
+FRPC_CONFIG="${OPENCODE_FRPC_CONFIG:-$RELAY_CONFIG_DIR/frpc.toml}"
+FRPC_BIN="${OPENCODE_FRPC_BIN:-$RELAY_LIB_DIR/bin/frpc}"
+MACHINE_CREDENTIAL="${OPENCODE_MACHINE_CREDENTIAL:-$RELAY_CONFIG_DIR/machine.json}"
+
+machine_transport() {
+  relay_private_file "$MACHINE_CREDENTIAL" || return 10
+  local value
+  value=$(jq -c '{sshAlias,relayOrigin,targetID:.machine.targetID,localForwardPort:.transport.localForwardPort,frpServerHost:.transport.frpServerHost,frpServerPort:.transport.frpServerPort}' \
+    "$MACHINE_CREDENTIAL" 2>/dev/null) || return 10
+  MACHINE_SSH_ALIAS="${OPENCODE_RELAY_SSH_ALIAS:-$(jq -r '.sshAlias // empty' <<< "$value")}"
+  MACHINE_RELAY_ORIGIN="${OPENCODE_RELAY_ORIGIN:-$(jq -r '.relayOrigin // empty' <<< "$value")}"
+  MACHINE_TARGET_ID=$(jq -r '.targetID // empty' <<< "$value")
+  MACHINE_LOCAL_FORWARD_PORT=$(jq -r '.localForwardPort // empty' <<< "$value")
+  MACHINE_FRP_SERVER_HOST=$(jq -r '.frpServerHost // "127.0.0.1"' <<< "$value")
+  MACHINE_FRP_SERVER_PORT=$(jq -r '.frpServerPort // empty' <<< "$value")
+  [[ -n "$MACHINE_SSH_ALIAS" && -n "$MACHINE_TARGET_ID" && "$MACHINE_LOCAL_FORWARD_PORT" == <1-65535> \
+    && "$MACHINE_FRP_SERVER_PORT" == <1-65535> ]] || return 10
+}
+
+tunnel_process_valid() {
+  local entry="$1" process
+  process=$(jq -c '{pid,created,executable,parentPid,pgid}' <<< "$entry")
+  relay_process_matches "$process"
+}
+
+tunnel_state_read() {
+  [[ -f "$TUNNEL_STATE" ]] || return 1
+  jq -e '(.schema == 1) and (.ssh.pid > 0) and (.frpc.pid > 0)' "$TUNNEL_STATE" >/dev/null 2>&1 || return 1
+  jq -c . "$TUNNEL_STATE"
+}
+
+tunnel_running() {
+  local state="$1"
+  tunnel_process_valid "$(jq -c '.ssh' <<< "$state")" || return 1
+  tunnel_process_valid "$(jq -c '.frpc' <<< "$state")" || return 1
+}
+
+public_probe_status() {
+  local token="${OPENCODE_RELAY_PROBE_TOKEN:-${RELAY_BEARER_TOKEN:-}}"
+  [[ -n "$token" && -n "${MACHINE_RELAY_ORIGIN:-}" ]] || { print -n -- 000; return; }
+  local result
+  result=$(curl --silent --output /dev/null --max-time 8 --write-out '%{http_code}' \
+    --header "Authorization: Bearer $token" --header "X-OpenCode-Target: $MACHINE_TARGET_ID" \
+    "$MACHINE_RELAY_ORIGIN/global/health" 2>/dev/null) || result=000
+  print -n -- "${result:-000}"
+}
+
+tunnel_status_json() {
+  local state tunnel_status="Stopped" ssh_pid=null frpc_pid=null
+  if state=$(tunnel_state_read 2>/dev/null); then
+    ssh_pid=$(jq -r '.ssh.pid' <<< "$state"); frpc_pid=$(jq -r '.frpc.pid' <<< "$state")
+    if tunnel_running "$state"; then tunnel_status="Running"; else tunnel_status="Stale"; fi
+  fi
+  machine_transport >/dev/null 2>&1 || true
+  local local_code public_code
+  relay_probe >/dev/null 2>&1 && local_code=200 || local_code=0
+  public_code=$(public_probe_status)
+  jq -cn --arg Status "$tunnel_status" --argjson SSH "$ssh_pid" --argjson FRPC "$frpc_pid" \
+    --argjson LocalHTTP "$local_code" --arg PublicHTTP "${public_code:-000}" \
+    '{Status:$Status,Processes:{SSH:$SSH,FRPC:$FRPC},LocalHTTP:$LocalHTTP,PublicHTTP:$PublicHTTP}'
+}
+
+spawn_detached() {
+  local executable="$1" stdout="$2" stderr="$3"
+  shift 3
+  local envelope handshake pid
+  envelope=$(jq -cn --arg executable "$executable" --arg stdoutPath "$stdout" --arg stderrPath "$stderr" \
+    --args '$ARGS.positional as $args | {executable:$executable,args:$args,stdoutPath:$stdoutPath,stderrPath:$stderrPath}' -- "$@")
+  handshake=$(print -r -- "$envelope" | "$RELAY_NODE" "$RELAY_DAEMON_LAUNCHER") || return 1
+  pid=$(jq -r '.pid // 0' <<< "$handshake" 2>/dev/null)
+  [[ "$pid" == <1-> ]] || return 1
+  sleep 0.1
+  relay_process_json "$pid"
+}
+
+stop_entry() {
+  local entry="$1"
+  tunnel_process_valid "$entry" || return 6
+  relay_kill_verified_group "$(jq -c '{pid,created,executable,parentPid,pgid}' <<< "$entry")" 2
+}
+
+start_tunnel() {
+  local state
+  if state=$(tunnel_state_read 2>/dev/null); then
+    if tunnel_running "$state"; then return 0; fi
+    print -u2 -- 'Tunnel state is stale; inspect ownership before restarting it.'
+    return 6
+  fi
+  machine_transport || { print -u2 -- 'Machine transport assignment is missing or invalid.'; return 10; }
+  [[ -x "$FRPC_BIN" ]] && relay_private_file "$FRPC_CONFIG" || return 10
+  command -v nc >/dev/null 2>&1 || return 10
+  command -v ssh >/dev/null 2>&1 || return 10
+  local launch_id ssh_entry frpc_entry deadline
+  launch_id="$(date +%Y%m%dT%H%M%S)-$$-$RANDOM"
+  ssh_entry=$(spawn_detached /usr/bin/ssh "$RELAY_LOG_ROOT/ssh-$launch_id.stdout.log" "$RELAY_LOG_ROOT/ssh-$launch_id.stderr.log" \
+    -o BatchMode=yes -o ConnectTimeout=10 -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+    -N -L "$MACHINE_LOCAL_FORWARD_PORT:$MACHINE_FRP_SERVER_HOST:$MACHINE_FRP_SERVER_PORT" "$MACHINE_SSH_ALIAS") || return 7
+  deadline=$(( EPOCHSECONDS + 10 ))
+  while ! nc -z 127.0.0.1 "$MACHINE_LOCAL_FORWARD_PORT" >/dev/null 2>&1; do
+    if (( EPOCHSECONDS >= deadline )) || ! tunnel_process_valid "$ssh_entry"; then
+      relay_kill_verified_group "$(jq -c '{pid,created,executable,parentPid,pgid}' <<< "$ssh_entry")" 2 || true
+      return 7
+    fi
+    sleep 0.2
+  done
+  frpc_entry=$(spawn_detached "$FRPC_BIN" "$RELAY_LOG_ROOT/frpc-$launch_id.stdout.log" \
+    "$RELAY_LOG_ROOT/frpc-$launch_id.stderr.log" -c "$FRPC_CONFIG") || {
+    relay_kill_verified_group "$(jq -c '{pid,created,executable,parentPid,pgid}' <<< "$ssh_entry")" 2 || true
+    return 7
+  }
+  sleep 1
+  if ! tunnel_process_valid "$frpc_entry"; then
+    relay_kill_verified_group "$(jq -c '{pid,created,executable,parentPid,pgid}' <<< "$ssh_entry")" 2 || true
+    return 7
+  fi
+  local tmp
+  tmp=$(mktemp "$RELAY_STATE_ROOT/.tunnel-state.XXXXXX") || return 10
+  chmod 600 "$tmp"
+  jq -cn --argjson ssh "$ssh_entry" --argjson frpc "$frpc_entry" '{schema:1,ssh:$ssh,frpc:$frpc}' > "$tmp"
+  mv -f "$tmp" "$TUNNEL_STATE"
+}
+
+stop_tunnel() {
+  local state
+  state=$(tunnel_state_read 2>/dev/null) || return 0
+  local frpc_entry ssh_entry
+  frpc_entry=$(jq -c '.frpc' <<< "$state")
+  ssh_entry=$(jq -c '.ssh' <<< "$state")
+  tunnel_process_valid "$frpc_entry" && stop_entry "$frpc_entry"
+  tunnel_process_valid "$ssh_entry" && stop_entry "$ssh_entry"
+  rm -f "$TUNNEL_STATE"
+}
+
+relay_lock_acquire 20 || exit $?
+trap relay_lock_release EXIT
+case "$action" in
+  status) ;;
+  start) start_tunnel || exit $? ;;
+  stop) stop_tunnel || exit $? ;;
+  restart) stop_tunnel || exit $?; start_tunnel || exit $? ;;
+  *) print -u2 -- "Unsupported tunnel action: $action"; exit 10 ;;
+esac
+
+result=$(tunnel_status_json)
+if $json; then
+  print -r -- "$result"
+else
+  print -r -- "Status: $(jq -r '.Status' <<< "$result")"
+  print -r -- "Local backend HTTP: $(jq -r '.LocalHTTP' <<< "$result")"
+  print -r -- "Public route HTTP: $(jq -r '.PublicHTTP' <<< "$result")"
+fi
+[[ "$(jq -r '.Status' <<< "$result")" == Running ]] && exit 0
+[[ "$action" == stop ]] && exit 0
+exit 3

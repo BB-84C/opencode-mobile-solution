@@ -298,10 +298,9 @@ test('completes machine OAuth, synchronizes its name in both directions, and rev
   assert.equal((await machineRename.json()).machine.displayName, 'Portable Mac');
   assert.equal(store.machineTargets()[0].displayName, 'Portable Mac');
 
-  const revoked = await fetch(`${baseUrl}/api/machine/revoke`, {
-    method: 'POST',
-    headers: originHeaders(session),
-    body: JSON.stringify({ machineID: token.machine.machineID }),
+  const revoked = await fetch(`${baseUrl}/api/machine/me`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token.access_token}` },
   });
   assert.equal(revoked.status, 200);
   assert.equal(getRevokedMachineID(), token.machine.machineID);

@@ -1,14 +1,17 @@
 #!/bin/zsh
 
+# opencode-relay-managed-client v1
 # Product-level relay orchestration. The original, ownership-safe backend
 # controller remains in opencode-relay-server-core and is never bypassed.
 
 setopt pipe_fail
 
-CORE="$HOME/.local/bin/opencode-relay-server-core"
-TUNNEL="$HOME/.local/bin/opencode-frp-tunnel"
-AGENT="$HOME/.local/bin/opencode-machine-agent"
-AUTH_MODULE="$HOME/.local/lib/opencode-relay/opencode-machine-auth.mjs"
+BIN_DIRECTORY="${OPENCODE_RELAY_BIN_DIR:-$HOME/.local/bin}"
+LIB_DIRECTORY="${OPENCODE_RELAY_LIB_DIR:-$HOME/.local/lib/opencode-relay}"
+CORE="$BIN_DIRECTORY/opencode-relay-server-core"
+TUNNEL="$BIN_DIRECTORY/opencode-frp-tunnel"
+AGENT="$BIN_DIRECTORY/opencode-machine-agent"
+AUTH_MODULE="$LIB_DIRECTORY/opencode-machine-auth.mjs"
 
 [[ -x "$CORE" ]] || { print -u2 -- 'OpenCode relay backend core is missing.'; exit 10; }
 
@@ -16,7 +19,7 @@ case "${1:-}" in
   __register|__unregister) exec "$CORE" "$@" ;;
 esac
 
-source "$HOME/.local/lib/opencode-relay/common.sh" || exit 10
+source "$LIB_DIRECTORY/common.sh" || exit 10
 relay_load_config || exit $?
 
 action="${1:-status}"

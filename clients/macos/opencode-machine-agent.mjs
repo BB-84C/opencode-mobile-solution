@@ -6,9 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 const home = os.homedir();
-const configDirectory = process.env.OPENCODE_RELAY_CONFIG_DIR || path.join(home, '.config', 'opencode-relay');
+const configDirectory = process.env.OPENCODE_RELAY_CONFIG_DIR
+  || path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'opencode-relay');
 const credentialPath = process.env.OPENCODE_MACHINE_CREDENTIAL || path.join(configDirectory, 'machine.json');
-const statusPath = process.env.OPENCODE_MACHINE_AGENT_STATUS || path.join(home, '.local', 'state', 'opencode-relay', 'machine-agent-status.json');
+const statusPath = process.env.OPENCODE_MACHINE_AGENT_STATUS
+  || path.join(process.env.XDG_STATE_HOME || path.join(home, '.local', 'state'), 'opencode-relay', 'machine-agent-status.json');
 const localPort = Number(process.env.OPENCODE_SERVER_PORT || 4096);
 const username = process.env.OPENCODE_SERVER_USERNAME || '';
 const password = process.env.OPENCODE_SERVER_PASSWORD || '';

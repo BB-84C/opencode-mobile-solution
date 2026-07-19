@@ -23,7 +23,7 @@ let wakeSleep = null;
 
 function applyUserOnlyAcl(filePath) {
   if (process.platform !== 'win32') return;
-  const result = spawnSync('icacls.exe', [filePath, '/inheritance:r', '/grant:r', `${os.userInfo().username}:F`], { stdio: 'ignore' });
+  const result = spawnSync('icacls.exe', [filePath, '/inheritance:r', '/grant:r', `${os.userInfo().username}:F`], { stdio: 'ignore', windowsHide: true });
   if (result.status !== 0) {
     const error = new Error(`Failed to apply user-only ACL to ${filePath}`);
     error.exitCode = 10;

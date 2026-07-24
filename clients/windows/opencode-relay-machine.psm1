@@ -438,6 +438,36 @@ function Get-RelaySupervisorStatus {
     }
 }
 
+function Start-RelaySupervisorProcess {
+    # Production launch for the resident supervisor: a hidden, detached pwsh that
+    # survives this controller's exit and shows no console window. Injects the
+    # resolved config into this process's environment (process scope) so the child
+    # inherits it, then restores. Returns the launched PID.
+    param(
+        [Parameter(Mandatory)][string]$PwshExecutable,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Arguments,
+        [Parameter(Mandatory)][hashtable]$EnvMap,
+        [Parameter(Mandatory)][psobject]$MachineConfig
+    )
+
+    [IO.Directory]::CreateDirectory([string]$MachineConfig.LogRoot) | Out-Null
+    $launchId = [guid]::NewGuid().ToString('N')
+    $stdoutPath = Join-Path ([string]$MachineConfig.LogRoot) ("tunnel-supervisor-$launchId.stdout.log")
+    $stderrPath = Join-Path ([string]$MachineConfig.LogRoot) ("tunnel-supervisor-$launchId.stderr.log")
+    $previous = @{}
+    foreach ($key in $EnvMap.Keys) {
+        $previous[[string]$key] = [Environment]::GetEnvironmentVariable([string]$key, 'Process')
+        [Environment]::SetEnvironmentVariable([string]$key, [string]$EnvMap[$key], 'Process')
+    }
+    try {
+        $proc = Start-Process -FilePath $PwshExecutable -ArgumentList $Arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        return [int]$proc.Id
+    }
+    finally {
+        foreach ($key in $previous.Keys) { [Environment]::SetEnvironmentVariable([string]$key, $previous[$key], 'Process') }
+    }
+}
+
 function Start-RelaySupervisor {
     param(
         [Parameter(Mandatory)][psobject]$Config,
@@ -459,11 +489,6 @@ function Start-RelaySupervisor {
     Remove-Item -LiteralPath $MachineConfig.SupervisorStopSentinelPath -Force -ErrorAction SilentlyContinue
 
     $pwshExecutable = (Get-Command pwsh -ErrorAction Stop).Source
-    # The daemon launcher spawns with node's detached flag, which terminates a
-    # directly spawned pwsh child immediately (native cmd/ssh/frpc and node all
-    # survive it). Wrap pwsh in cmd.exe: the detached survivor is cmd, which then
-    # hosts the resident pwsh supervisor. The tracked/captured process is cmd.
-    $commandProcessor = if ([string]::IsNullOrWhiteSpace([string]$env:ComSpec)) { 'cmd.exe' } else { [string]$env:ComSpec }
     $envMap = @{
         OPENCODE_SERVER_PORT = [string][int]$Config.Port
         OPENCODE_SERVER_USERNAME = [string]$Config.Username
@@ -474,9 +499,21 @@ function Start-RelaySupervisor {
         OPENCODE_FRPC_EXE = [string]$MachineConfig.FrpcExecutable
         OPENCODE_RELAY_SUPERVISOR_INTERVAL_MS = [string][int]$MachineConfig.SupervisorIntervalMs
     }
-    $arguments = @('/d', '/c', $pwshExecutable, '-NoProfile', '-NoLogo', '-File', [string]$MachineConfig.SupervisorModule)
-    $supervisorPid = Start-RelayMachineDaemonProcess -MachineConfig $MachineConfig -Executable $commandProcessor -Arguments $arguments -LogPrefix 'tunnel-supervisor' -EnvMap $envMap -DaemonProvider $DaemonProvider
-    $info = Wait-RelayMachineProcessCapture -ProcessId $supervisorPid -ExpectedExecutable $commandProcessor -ProcessProvider $ProcessProvider -SleepProvider $SleepProvider -LogRoot ([string]$MachineConfig.LogRoot)
+    $arguments = @('-NoProfile', '-NoLogo', '-File', [string]$MachineConfig.SupervisorModule)
+    if ($null -ne $DaemonProvider) {
+        # Test path: honor the injected (mockable) daemon launcher.
+        $supervisorPid = Start-RelayMachineDaemonProcess -MachineConfig $MachineConfig -Executable $pwshExecutable -Arguments $arguments -LogPrefix 'tunnel-supervisor' -EnvMap $envMap -DaemonProvider $DaemonProvider
+    }
+    else {
+        # Production: launch hidden via Start-Process. The node-based daemon launcher
+        # spawns with detached:true, which terminates a bare pwsh child immediately;
+        # a cmd.exe wrapper survives but leaves a visible console window on the
+        # desktop that a user will close by mistake. A hidden Start-Process gives
+        # pwsh a hidden console it is happy with, survives this controller's exit,
+        # and shows no window.
+        $supervisorPid = Start-RelaySupervisorProcess -PwshExecutable $pwshExecutable -Arguments $arguments -EnvMap $envMap -MachineConfig $MachineConfig
+    }
+    $info = Wait-RelayMachineProcessCapture -ProcessId $supervisorPid -ExpectedExecutable $pwshExecutable -ProcessProvider $ProcessProvider -SleepProvider $SleepProvider -LogRoot ([string]$MachineConfig.LogRoot)
     Write-RelayMachineStateFile -Path $MachineConfig.SupervisorStatePath -Value ([PSCustomObject]@{
         schema = 1
         process = [PSCustomObject]@{ pid = [int]$info.PID; createdUtc = $info.CreationTimeUtc; executable = $info.ExecutablePath; parentPid = $info.ParentPID }
@@ -525,9 +562,7 @@ function Stop-RelaySupervisor {
     $final = Test-RelayMachineProcessIdentity -RecordedProcess $state.process -ProcessProvider $ProcessProvider
     if ($final.Match) {
         $warnings.Add('Supervisor did not honor the stop request; it was terminated.')
-        # The tracked process is the cmd host; tree-kill so its pwsh child dies too.
-        $supervisorKillPid = [int]$state.process.pid
-        try { & taskkill.exe /F /T /PID $supervisorKillPid 2>&1 | Out-Null } catch { try { Stop-Process -Id $supervisorKillPid -Force -ErrorAction Stop } catch { } }
+        try { Stop-Process -Id ([int]$state.process.pid) -Force -ErrorAction Stop } catch { }
         if ($null -ne $SleepProvider) { & $SleepProvider 500 } else { Start-Sleep -Milliseconds 500 }
         $post = Test-RelayMachineProcessIdentity -RecordedProcess $state.process -ProcessProvider $ProcessProvider
         if ($post.Match) {

@@ -92,13 +92,14 @@ describe('session cache storage', () => {
       ],
     });
 
-    const stored = asyncStorageBacking.get('opencode-mobile.sessionCache.v1') ?? '';
+    const stored = asyncStorageBacking.get('opencode-mobile.sessionCache.v2') ?? '';
     expect(stored).not.toContain('secret-token');
-    expect(asyncStorage.setItem).toHaveBeenCalledWith('opencode-mobile.sessionCache.v1', expect.any(String));
+    expect(asyncStorage.setItem).toHaveBeenCalledWith('opencode-mobile.sessionCache.v2', expect.any(String));
   });
 
-  it('returns an empty cache when persisted data is missing or corrupt', async () => {
+  it('drops the unbounded v1 value without reading it and returns an empty cache when v2 is missing or corrupt', async () => {
     const { loadSessionCache } = await import('./session-cache-storage');
+    asyncStorageBacking.set('opencode-mobile.sessionCache.v1', 'legacy-cache-must-not-be-read');
     await expect(loadSessionCache()).resolves.toEqual({
       sessions: {},
       projects: {},
@@ -112,22 +113,79 @@ describe('session cache storage', () => {
       lspStatuses: {},
       mcpStatuses: {},
       queuedPrompts: [],
+    });
+    expect(asyncStorage.removeItem).toHaveBeenCalledWith('opencode-mobile.sessionCache.v1');
+    expect(asyncStorage.getItem).not.toHaveBeenCalledWith('opencode-mobile.sessionCache.v1');
+
+    asyncStorageBacking.set('opencode-mobile.sessionCache.v2', '{');
+    await expect(loadSessionCache()).resolves.toEqual({
+      sessions: {},
+      projects: {},
+      sessionStatuses: {},
+      agents: {},
+      commands: {},
+      messages: {},
+      diffs: {},
+      todos: {},
+      sessionContexts: {},
+      lspStatuses: {},
+      mcpStatuses: {},
+      queuedPrompts: [],
+    });
+  });
+
+  it('bounds session metadata and transcript count, message count, and serialized size', async () => {
+    const {
+      loadSessionCache,
+      MAX_CACHED_SESSIONS_PER_HOST,
+      MAX_CACHED_TRANSCRIPTS,
+      MAX_CACHED_TRANSCRIPT_JSON_CHARS,
+      MAX_CACHED_TRANSCRIPT_MESSAGES,
+      saveHostSessionCache,
+      saveSessionTranscriptCache,
+    } = await import('./session-cache-storage');
+    const sessions = Array.from({ length: MAX_CACHED_SESSIONS_PER_HOST + 5 }, (_, index) => ({
+      id: `session-${index}`,
+      title: `Session ${index}`,
+    }));
+
+    await saveHostSessionCache('host-a', {
+      sessions,
+      projects: [],
+      sessionStatuses: Object.fromEntries(sessions.map((session) => [session.id, { type: 'idle' as const }])),
+      agents: [],
+      commands: [],
     });
 
-    asyncStorageBacking.set('opencode-mobile.sessionCache.v1', '{');
-    await expect(loadSessionCache()).resolves.toEqual({
-      sessions: {},
-      projects: {},
-      sessionStatuses: {},
-      agents: {},
-      commands: {},
-      messages: {},
-      diffs: {},
-      todos: {},
-      sessionContexts: {},
-      lspStatuses: {},
-      mcpStatuses: {},
-      queuedPrompts: [],
-    });
+    for (let transcriptIndex = 0; transcriptIndex < MAX_CACHED_TRANSCRIPTS + 2; transcriptIndex += 1) {
+      const messages: MessageWithParts[] = [
+        ...Array.from({ length: MAX_CACHED_TRANSCRIPT_MESSAGES + 5 }, (_, messageIndex) => ({
+          info: { id: `m-${transcriptIndex}-${messageIndex}`, role: 'assistant' as const, sessionID: `t-${transcriptIndex}` },
+          parts: [{ type: 'text' as const, text: 'bounded' }],
+        })),
+        {
+          info: { id: `oversized-${transcriptIndex}`, role: 'assistant', sessionID: `t-${transcriptIndex}` },
+          parts: [{ type: 'text', text: 'x'.repeat(MAX_CACHED_TRANSCRIPT_JSON_CHARS + 1) }],
+        },
+      ];
+      await saveSessionTranscriptCache(`t-${transcriptIndex}`, {
+        messages,
+        diffs: [],
+        todos: [],
+        context: [],
+        lspStatus: [],
+        mcpStatus: {},
+      });
+    }
+
+    const snapshot = await loadSessionCache();
+    expect(snapshot.sessions['host-a']).toHaveLength(MAX_CACHED_SESSIONS_PER_HOST);
+    expect(Object.keys(snapshot.sessionStatuses['host-a'])).toHaveLength(MAX_CACHED_SESSIONS_PER_HOST);
+    expect(Object.keys(snapshot.messages)).toHaveLength(MAX_CACHED_TRANSCRIPTS);
+    for (const messages of Object.values(snapshot.messages)) {
+      expect(messages.length).toBeLessThanOrEqual(MAX_CACHED_TRANSCRIPT_MESSAGES);
+      expect(messages.some((message) => message.info.id.startsWith('oversized-'))).toBe(false);
+      expect(JSON.stringify(messages).length).toBeLessThanOrEqual(MAX_CACHED_TRANSCRIPT_JSON_CHARS);
+    }
   });
 });

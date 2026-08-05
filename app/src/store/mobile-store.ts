@@ -2,6 +2,7 @@ import { create } from 'zustand';
 
 import {
   compareSessionsByRecency,
+  DEFAULT_MESSAGE_PAGE_LIMIT,
   OpenCodeClient,
   OpenCodeRequestError,
 } from '@/src/opencode/client';
@@ -129,6 +130,9 @@ export interface MobileStore {
   relayTargets: Record<string, RelayTargetState[]>;
   sessionStatuses: Record<string, SessionStatus>;
   messages: Record<string, MessageWithParts[]>;
+  messageNextCursors: Record<string, string | null>;
+  olderMessageLoadStates: Record<string, LoadingState>;
+  olderMessageErrors: Record<string, string | null>;
   sessionContexts: Record<string, SessionContextMessage[]>;
   todos: Record<string, TodoItem[]>;
   lspStatuses: Record<string, LspStatus[]>;
@@ -174,6 +178,7 @@ export interface MobileStore {
   subscribeToActiveHost(): void;
   unsubscribeFromHost(connectionId: string): void;
   openSession(ref: SessionInput): Promise<void>;
+  loadOlderMessages(ref: SessionInput): Promise<void>;
   searchFileReferences(query: string, ref?: SessionInput): Promise<FileReference[]>;
   startNewSessionPrompt(): void;
   sendPrompt(text: string): Promise<string | null>;
@@ -209,10 +214,12 @@ export interface MobileStore {
 
 const interruptWindowMs = 5_000;
 const maxPromptHistory = 50;
+const MAX_SYNCED_SESSIONS_PER_TARGET = 1_000;
 let addConnectionQueue = Promise.resolve();
 let openGeneration = 0;
 let refreshGeneration = 0;
 const openSessionFlights = new Map<string, Promise<void>>();
+const olderMessageFlights = new Map<string, Promise<void>>();
 const latestOpenGeneration = new Map<string, number>();
 const latestRefreshGeneration = new Map<string, number>();
 
@@ -252,6 +259,9 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
   relayTargets: {},
   sessionStatuses: {},
   messages: {},
+  messageNextCursors: {},
+  olderMessageLoadStates: {},
+  olderMessageErrors: {},
   sessionContexts: {},
   todos: {},
   lspStatuses: {},
@@ -439,6 +449,9 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
         relayTargets: omitRecordKey(state.relayTargets, id),
         sessionStatuses: omitCompositeConnection(state.sessionStatuses, id),
         messages: omitCompositeConnection(state.messages, id),
+        messageNextCursors: omitCompositeConnection(state.messageNextCursors, id),
+        olderMessageLoadStates: omitCompositeConnection(state.olderMessageLoadStates, id),
+        olderMessageErrors: omitCompositeConnection(state.olderMessageErrors, id),
         diffs: omitCompositeConnection(state.diffs, id),
         todos: omitCompositeConnection(state.todos, id),
         sessionContexts: omitCompositeConnection(state.sessionContexts, id),
@@ -724,6 +737,62 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
       if (openSessionFlights.get(key) === flight) openSessionFlights.delete(key);
     });
     openSessionFlights.set(key, flight);
+    return flight;
+  },
+
+  async loadOlderMessages(input) {
+    let ref: SessionRef;
+    try {
+      ref = resolveSessionInput(input, get());
+    } catch (error) {
+      set({ error: errorMessage(error) });
+      return;
+    }
+    const key = sessionStateKey(ref);
+    const cursor = get().messageNextCursors[key];
+    if (!cursor) return;
+    const existing = olderMessageFlights.get(key);
+    if (existing) return existing;
+    const connection = connectionForRef(get(), ref);
+    if (!connection) return;
+
+    set((state) => ({
+      olderMessageLoadStates: { ...state.olderMessageLoadStates, [key]: 'loading' },
+      olderMessageErrors: { ...state.olderMessageErrors, [key]: null },
+    }));
+    const flight = (async () => {
+      try {
+        const page = await clientFor(connection, ref.relayTargetID).listMessagePage(ref.sessionId, {
+          limit: DEFAULT_MESSAGE_PAGE_LIMIT,
+          before: cursor,
+        });
+        if (page.nextCursor === cursor) {
+          throw new Error('OpenCode message pagination returned a repeated cursor');
+        }
+        set((state) => {
+          if (state.messageNextCursors[key] !== cursor) return {};
+          return {
+            messages: {
+              ...state.messages,
+              [key]: mergeRestWithLiveMessages(page.items, state.messages[key] ?? []),
+            },
+            messageNextCursors: { ...state.messageNextCursors, [key]: page.nextCursor },
+            olderMessageLoadStates: { ...state.olderMessageLoadStates, [key]: 'idle' },
+            olderMessageErrors: { ...state.olderMessageErrors, [key]: null },
+          };
+        });
+        persistTranscriptCache(ref, get());
+      } catch (error) {
+        const message = errorMessage(error);
+        set((state) => ({
+          olderMessageLoadStates: { ...state.olderMessageLoadStates, [key]: 'error' },
+          olderMessageErrors: { ...state.olderMessageErrors, [key]: message },
+        }));
+      }
+    })().finally(() => {
+      if (olderMessageFlights.get(key) === flight) olderMessageFlights.delete(key);
+    });
+    olderMessageFlights.set(key, flight);
     return flight;
   },
 
@@ -1114,7 +1183,7 @@ async function probeRelayTarget(connection: HostConnection, target: RelayTarget)
   const client = clientFor(connection, target.id);
   const [health, sessionsResult, statuses] = await Promise.allSettled([
     client.health(),
-    client.listSessions(),
+    client.listSessions({ maxItems: MAX_SYNCED_SESSIONS_PER_TARGET }),
     client.getSessionStatus(),
   ]);
   const sessions = sessionsResult.status === 'fulfilled'
@@ -1152,7 +1221,7 @@ async function loadSession(
   const query = workspaceQueryForSession(session);
   const questionRevision = get().questionRevision;
   const results = await Promise.allSettled([
-    client.listMessages(ref.sessionId),
+    client.listMessagePage(ref.sessionId, { limit: DEFAULT_MESSAGE_PAGE_LIMIT }),
     client.getSessionDiff(ref.sessionId),
     client.getSessionTodos(ref.sessionId),
     client.getSessionContext(ref.sessionId),
@@ -1168,7 +1237,7 @@ async function loadSession(
 
   const [messagesResult, diffsResult, todosResult, contextResult, lspResult, mcpResult, questionsResult, agentsResult, providersResult, configResult, commandsResult] = results;
   const messages = messagesResult.status === 'fulfilled'
-    ? mergeRestWithLiveMessages(messagesResult.value, get().messages[key] ?? [])
+    ? mergeRestWithLiveMessages(messagesResult.value.items, get().messages[key] ?? [])
     : get().messages[key] ?? [];
   const directory = directoryForSession(session);
   const scopeKey = executionScopeKey(ref, directory);
@@ -1218,6 +1287,13 @@ async function loadSession(
       : state.questions;
     return {
       messages: { ...state.messages, [key]: messages },
+      ...(messagesResult.status === 'fulfilled'
+        ? {
+            messageNextCursors: { ...state.messageNextCursors, [key]: messagesResult.value.nextCursor },
+            olderMessageLoadStates: { ...state.olderMessageLoadStates, [key]: 'idle' as const },
+            olderMessageErrors: { ...state.olderMessageErrors, [key]: null },
+          }
+        : {}),
       ...(diffsResult.status === 'fulfilled' ? { diffs: { ...state.diffs, [key]: diffsResult.value } } : {}),
       ...(todosResult.status === 'fulfilled' ? { todos: { ...state.todos, [key]: todosResult.value } } : {}),
       ...(contextResult.status === 'fulfilled' ? { sessionContexts: { ...state.sessionContexts, [key]: contextResult.value } } : {}),
@@ -1261,12 +1337,17 @@ async function openSessionInBackground(ref: SessionRef, connection: HostConnecti
     const questionRevision = get().questionRevision;
     const client = clientFor(connection, ref.relayTargetID);
     const [messagesResult, questionsResult] = await Promise.allSettled([
-      client.listMessages(ref.sessionId),
+      client.listMessagePage(ref.sessionId, { limit: DEFAULT_MESSAGE_PAGE_LIMIT }),
       client.listQuestions(workspaceQueryForSession(session)),
     ]);
     set((state) => ({
       ...(messagesResult.status === 'fulfilled'
-        ? { messages: { ...state.messages, [key]: mergeRestWithLiveMessages(messagesResult.value, state.messages[key] ?? []) } }
+        ? {
+            messages: { ...state.messages, [key]: mergeRestWithLiveMessages(messagesResult.value.items, state.messages[key] ?? []) },
+            ...(state.messageNextCursors[key] === undefined
+              ? { messageNextCursors: { ...state.messageNextCursors, [key]: messagesResult.value.nextCursor } }
+              : {}),
+          }
         : {}),
       ...(questionsResult.status === 'fulfilled' && state.questionRevision === questionRevision
         ? { questions: mergeQuestionsForTarget(state.questions, ref, questionsResult.value) }

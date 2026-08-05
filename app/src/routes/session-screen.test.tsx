@@ -44,6 +44,9 @@ const mocks = vi.hoisted(() => ({
       ],
       [JSON.stringify(['relay', 'mac', 'child'])]: [{ info: { id: 'm3', role: 'assistant', sessionID: 'child' }, parts: [{ type: 'text', text: 'child answer' }] }],
     },
+    messageNextCursors: { [JSON.stringify(['relay', 'mac', 'root'])]: null } as Record<string, string | null>,
+    olderMessageLoadStates: {} as Record<string, 'idle' | 'loading' | 'error'>,
+    olderMessageErrors: {} as Record<string, string | null>,
     questions: {},
     sessionLoadStates: { [JSON.stringify(['relay', 'mac', 'root'])]: 'idle' },
     sessionErrors: {},
@@ -67,6 +70,7 @@ const mocks = vi.hoisted(() => ({
     promptMode: 'ask',
     setActiveConnection: vi.fn(() => true),
     openSession: vi.fn(async () => undefined),
+    loadOlderMessages: vi.fn(async () => undefined),
     subscribeToActiveHost: vi.fn(),
     unsubscribeFromHost: vi.fn(),
     searchFileReferences: vi.fn(async () => []),
@@ -204,6 +208,7 @@ describe('SessionScreen composite route', () => {
     mocks.clipboardRead.mockClear();
     mocks.scrollToLatest.mockClear();
     mocks.state.openSession.mockClear();
+    mocks.state.loadOlderMessages.mockClear();
     mocks.state.subscribeToActiveHost.mockClear();
     mocks.state.unsubscribeFromHost.mockClear();
     mocks.state.sendPrompt.mockReset();
@@ -220,6 +225,9 @@ describe('SessionScreen composite route', () => {
       { info: { id: 'm1', role: 'user', sessionID: 'root' }, parts: [{ type: 'text', text: 'hello root' }] },
       { info: { id: 'm2', role: 'assistant', sessionID: 'root' }, parts: [{ type: 'tool', tool: 'task', state: { metadata: { sessionId: 'child' } } }] },
     ];
+    mocks.state.messageNextCursors = { [rootKey]: null };
+    mocks.state.olderMessageLoadStates = {};
+    mocks.state.olderMessageErrors = {};
   });
 
   it('opens the exact machine-scoped ref, subscribes, and never reads the clipboard on mount', async () => {
@@ -356,6 +364,15 @@ describe('SessionScreen composite route', () => {
     const screen = await renderScreen();
     expect(find(screen, 'session-offline-cache-banner')).toBeTruthy();
     expect(text(screen)).toContain('hello root');
+  });
+
+  it('requests the next server page when the local transcript window is exhausted', async () => {
+    mocks.state.messageNextCursors = { [rootKey]: 'older-page' };
+    const screen = await renderScreen();
+
+    await act(async () => find(screen, 'session-transcript').props.onOlderEndReached());
+
+    expect(mocks.state.loadOlderMessages).toHaveBeenCalledWith(rootRef);
   });
 });
 

@@ -263,7 +263,7 @@ describe('mobile store composite relay contract', () => {
     expect(messageTargets).toEqual(['mac', 'windows']);
   });
 
-  it('normalizes newest-page then older-page runs without reordering parts inside a message', async () => {
+  it('loads only the newest message page, then fetches older pages explicitly without reordering parts', async () => {
     const latestParts = [
       { id: 'step-start', type: 'step-start' as const },
       { id: 'reasoning', type: 'reasoning' as const, text: 'Checking cutover' },
@@ -296,8 +296,16 @@ describe('mobile store composite relay contract', () => {
 
     await useOpenCodeMobileStore.getState().openSession(ref);
 
-    const transcript = useOpenCodeMobileStore.getState().messages[sessionStateKey(ref)] ?? [];
+    const key = sessionStateKey(ref);
+    expect(useOpenCodeMobileStore.getState().messages[key]?.map((item) => item.info.id)).toEqual(['new-1', 'new-2']);
+    expect(useOpenCodeMobileStore.getState().messageNextCursors[key]).toBe('older-page');
+
+    await useOpenCodeMobileStore.getState().loadOlderMessages(ref);
+
+    const transcript = useOpenCodeMobileStore.getState().messages[key] ?? [];
     expect(transcript.map((item) => item.info.id)).toEqual(['old-1', 'old-2', 'new-1', 'new-2']);
+    expect(useOpenCodeMobileStore.getState().messageNextCursors[key]).toBeNull();
+    expect(useOpenCodeMobileStore.getState().olderMessageLoadStates[key]).toBe('idle');
     expect(transcript.at(-1)?.parts.map((part) => part.id)).toEqual([
       'step-start',
       'reasoning',

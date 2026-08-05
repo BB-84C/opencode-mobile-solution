@@ -83,6 +83,9 @@ export default function SessionScreen() {
     sessions: state.sessions,
     sessionStatuses: state.sessionStatuses,
     messages: state.messages,
+    messageNextCursors: state.messageNextCursors,
+    olderMessageLoadStates: state.olderMessageLoadStates,
+    olderMessageErrors: state.olderMessageErrors,
     questions: state.questions,
     sessionLoadStates: state.sessionLoadStates,
     sessionErrors: state.sessionErrors,
@@ -94,6 +97,7 @@ export default function SessionScreen() {
     promptMode: state.promptMode,
     setActiveConnection: state.setActiveConnection,
     openSession: state.openSession,
+    loadOlderMessages: state.loadOlderMessages,
     subscribeToActiveHost: state.subscribeToActiveHost,
     unsubscribeFromHost: state.unsubscribeFromHost,
     searchFileReferences: state.searchFileReferences,
@@ -174,6 +178,9 @@ export default function SessionScreen() {
   const status = key ? store.sessionStatuses[key] : undefined;
   const questions = key ? store.questions[key] ?? [] : [];
   const loadState = key ? store.sessionLoadStates[key] : undefined;
+  const nextMessageCursor = key ? store.messageNextCursors[key] : null;
+  const olderMessageLoadState = key ? store.olderMessageLoadStates[key] : undefined;
+  const olderMessageError = key ? store.olderMessageErrors[key] : null;
   const sessionError = key ? store.sessionErrors[key] : null;
   const connectionState = key ? store.eventConnectionStates[key] : undefined;
   const running = isRunningStatus(status);
@@ -233,8 +240,15 @@ export default function SessionScreen() {
   }, [key]);
 
   const revealOlderTranscript = useCallback(() => {
-    setTranscriptWindowSize((current) => growTranscriptWindow(current, transcript.length));
-  }, [transcript.length]);
+    if (transcriptWindowSize < transcript.length) {
+      setTranscriptWindowSize((current) => growTranscriptWindow(current, transcript.length));
+      return;
+    }
+    if (!ref || !nextMessageCursor || olderMessageLoadState === 'loading') return;
+    void store.loadOlderMessages(ref).then(() => {
+      setTranscriptWindowSize((current) => growTranscriptWindow(current, Number.MAX_SAFE_INTEGER));
+    });
+  }, [nextMessageCursor, olderMessageLoadState, ref, store.loadOlderMessages, transcript.length, transcriptWindowSize]);
 
   useEffect(() => {
     const trigger = getPromptAssistTrigger(prompt);
@@ -376,6 +390,8 @@ export default function SessionScreen() {
           </Text>
         ) : null}
         {sessionError ? <Text selectable testID="session-load-warning" style={styles.warning}>Transcript refresh warning · {sessionError}</Text> : null}
+        {olderMessageLoadState === 'loading' ? <Text testID="session-older-loading" style={styles.notice}>Loading older messages…</Text> : null}
+        {olderMessageError ? <Text selectable testID="session-older-error" style={styles.warning}>Older transcript warning · {olderMessageError}</Text> : null}
         {actionError ? <Text selectable testID="session-action-error" style={styles.error}>{actionError}</Text> : null}
 
         <View style={styles.transcriptFrame}>

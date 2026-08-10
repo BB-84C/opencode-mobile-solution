@@ -214,7 +214,6 @@ export interface MobileStore {
 
 const interruptWindowMs = 5_000;
 const maxPromptHistory = 50;
-const MAX_SYNCED_SESSIONS_PER_TARGET = 1_000;
 let addConnectionQueue = Promise.resolve();
 let openGeneration = 0;
 let refreshGeneration = 0;
@@ -1183,7 +1182,7 @@ async function probeRelayTarget(connection: HostConnection, target: RelayTarget)
   const client = clientFor(connection, target.id);
   const [health, sessionsResult, statuses] = await Promise.allSettled([
     client.health(),
-    client.listSessions({ maxItems: MAX_SYNCED_SESSIONS_PER_TARGET }),
+    client.listSessions(),
     client.getSessionStatus(),
   ]);
   const sessions = sessionsResult.status === 'fulfilled'

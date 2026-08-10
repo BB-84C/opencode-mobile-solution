@@ -81,7 +81,7 @@ export function isTransientOpenCodeError(error: unknown) {
 export interface OpenCodeClientLike {
   health(): Promise<HealthResponse>;
   listProjects(): Promise<Project[]>;
-  listSessions(options?: { maxItems?: number }): Promise<Session[]>;
+  listSessions(): Promise<Session[]>;
   listRelayTargets?(): Promise<RelayTarget[]>;
   getSession(sessionId: string): Promise<Session>;
   updateSession(sessionId: string, patch: Pick<Session, 'title'>): Promise<Session>;
@@ -210,16 +210,13 @@ export class OpenCodeClient implements OpenCodeClientLike {
     return this.request<Project[]>('/project');
   }
 
-  async listSessions(options: { maxItems?: number } = {}) {
+  async listSessions() {
     const sessions = new Map<string, Session>();
     const visitedCursors = new Set<string>();
-    const maxItems = positiveOptionalLimit(options.maxItems);
     let cursor: string | undefined;
 
     while (true) {
-      const remaining = maxItems === undefined ? DEFAULT_SESSION_PAGE_LIMIT : maxItems - sessions.size;
-      if (remaining <= 0) break;
-      const params = new URLSearchParams({ limit: String(Math.min(DEFAULT_SESSION_PAGE_LIMIT, remaining)) });
+      const params = new URLSearchParams({ limit: String(DEFAULT_SESSION_PAGE_LIMIT) });
       if (cursor) params.set('cursor', cursor);
       const page = await this.request<ApiSessionPage>(`/api/session?${params.toString()}`);
       const items = Array.isArray(page.data) ? page.data : [];
@@ -227,7 +224,6 @@ export class OpenCodeClient implements OpenCodeClientLike {
       for (const session of items) {
         if (!session?.id || sessions.has(session.id)) continue;
         sessions.set(session.id, normalizeEnumeratedSession(session, this.relayTargetID));
-        if (maxItems !== undefined && sessions.size >= maxItems) break;
       }
 
       const next = page.cursor?.next;
@@ -764,14 +760,6 @@ function sessionTimestamp(session: Session, field: 'created' | 'updated') {
 function positiveMessageLimit(limit = DEFAULT_MESSAGE_PAGE_LIMIT) {
   if (!Number.isInteger(limit) || limit <= 0) {
     throw new Error('OpenCode message limit must be a positive integer');
-  }
-  return limit;
-}
-
-function positiveOptionalLimit(limit?: number) {
-  if (limit === undefined) return undefined;
-  if (!Number.isInteger(limit) || limit <= 0) {
-    throw new Error('OpenCode session limit must be a positive integer');
   }
   return limit;
 }

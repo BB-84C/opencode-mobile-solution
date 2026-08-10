@@ -148,6 +148,53 @@ describe('mobile store composite relay contract', () => {
     expect(sessionCalls.every(([, init]) => Boolean(new Headers(init?.headers).get('X-OpenCode-Target')))).toBe(true);
   });
 
+  it('fully enumerates session metadata so an old session with recent activity is not lost after the first creation-time page', async () => {
+    const firstPage = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `newer-created-${index}`,
+      parentID: 'root',
+      time: { created: 2_000 - index, updated: 2_000 - index },
+    }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/pairing/me')) {
+        return jsonResponse({ device: { clientID: 'phone', displayName: 'Pocket' } });
+      }
+      if (url.endsWith('/relay/targets')) {
+        return jsonResponse({ targets: [{ id: 'woody', name: 'Woody' }] });
+      }
+      if (url.endsWith('/global/health')) return jsonResponse({ healthy: true, version: '1.17.18' });
+      if (url.endsWith('/api/session?limit=1000')) {
+        return jsonResponse({ data: firstPage, cursor: { next: 'older-created' } });
+      }
+      if (url.endsWith('/api/session?limit=1000&cursor=older-created')) {
+        return jsonResponse({
+          data: [{
+            id: 'old-but-active',
+            title: 'Recently active giant session',
+            time: { created: 1, updated: 10_000 },
+          }],
+          cursor: {},
+        });
+      }
+      if (url.endsWith('/session/status')) return jsonResponse({});
+      throw new Error(`unexpected request ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { useOpenCodeMobileStore } = await import('./mobile-store');
+    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id });
+
+    await useOpenCodeMobileStore.getState().refreshActiveHost();
+
+    const sessions = useOpenCodeMobileStore.getState().sessions[host.id];
+    expect(sessions).toHaveLength(1_001);
+    expect(sessions[0]).toMatchObject({
+      id: 'old-but-active',
+      relayTargetID: 'woody',
+      relayTargetName: 'Woody',
+    });
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/api/session?'))).toHaveLength(2);
+  });
+
   it('does not fall through to a relay default target when the authorized target list is empty', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

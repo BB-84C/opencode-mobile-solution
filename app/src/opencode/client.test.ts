@@ -167,29 +167,6 @@ describe('OpenCodeClient', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('stops session enumeration at an explicit memory-safe item cap', async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith('/api/session?limit=2')) {
-        return jsonResponse({
-          data: [
-            { id: 'newest', time: { updated: 3 } },
-            { id: 'next', time: { updated: 2 } },
-          ],
-          cursor: { next: 'must-not-be-followed' },
-        });
-      }
-      throw new Error(`memory cap was ignored: ${url}`);
-    });
-    const client = new OpenCodeClient(bearerConnection, { fetch: fetchMock });
-
-    await expect(client.listSessions({ maxItems: 2 })).resolves.toEqual([
-      expect.objectContaining({ id: 'newest' }),
-      expect.objectContaining({ id: 'next' }),
-    ]);
-    expect(fetchMock).toHaveBeenCalledOnce();
-  });
-
   it('discovers every authorized relay machine and tags sessions with their routing identity', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

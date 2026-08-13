@@ -135,9 +135,18 @@ function saveIssued(value) {
     authorizedAt: new Date().toISOString(),
   };
   atomicWrite(credentialPath, `${JSON.stringify(credential, null, 2)}\n`);
+  // When the relay issues a public frps host, frpc dials the server directly and
+  // the SSH local-forward layer is skipped. Without one (legacy enrollment), the
+  // two-layer design is preserved: 127.0.0.1 over the SSH forward port.
+  const issuedFrpsHost = typeof issued.transport?.frpServerHost === 'string' && issued.transport.frpServerHost.length > 0
+    ? issued.transport.frpServerHost
+    : '127.0.0.1';
+  const frpcServerPort = issuedFrpsHost === '127.0.0.1'
+    ? Number(issued.transport.localForwardPort || 17000)
+    : Number(issued.transport.frpServerPort || 7000);
   const frpc = [
-    `serverAddr = ${tomlString('127.0.0.1')}`,
-    `serverPort = ${Number(issued.transport.localForwardPort || 17000)}`,
+    `serverAddr = ${tomlString(issuedFrpsHost)}`,
+    `serverPort = ${frpcServerPort}`,
     '',
     'auth.method = "token"',
     `auth.token = ${tomlString(issued.transport.frpToken)}`,

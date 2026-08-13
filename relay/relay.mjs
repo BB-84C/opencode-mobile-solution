@@ -54,6 +54,7 @@ function readFrpToken(configPath) {
 
 const machineTransport = {
     frpToken: readFrpToken(FRPS_CONFIG_PATH),
+    frpsHost: process.env.FRP_SERVER_PUBLIC_HOST || '',
     frpServerPort: parseInt(process.env.FRP_SERVER_PORT || '7000', 10),
     localForwardPort: parseInt(process.env.FRP_LOCAL_FORWARD_PORT || '17000', 10),
     remotePortMin: parseInt(process.env.MACHINE_REMOTE_PORT_MIN || '4100', 10),
@@ -144,11 +145,20 @@ function probeTarget(target) {
             response.resume();
             response.once('end', () => resolve({ reachable: response.statusCode === 200, statusCode: response.statusCode }));
         });
-        request.setTimeout(2_000, () => request.destroy(new Error('probe timeout')));
+        // A short sync burst can transiently saturate the machine's single tunnel,
+        // so a single failed probe must not flip the badge. Two consecutive
+        // failures (see machineStatuses) plus this generous timeout keep short
+        // blips from surfacing as degraded.
+        request.setTimeout(4_000, () => request.destroy(new Error('probe timeout')));
         request.once('error', () => resolve({ reachable: false, statusCode: null }));
         request.end();
     });
 }
+
+// targetID -> number of consecutive failed probes. Debounces the online ->
+// degraded transition so sub-minute data-plane blips (for example an app sync
+// burst knocking the frp work pool) do not flicker the dashboard.
+const probeFailureCounts = new Map();
 
 async function machineStatuses(machines) {
     const targets = targetRegistry();
@@ -157,14 +167,17 @@ async function machineStatuses(machines) {
             return { ...machine, state: 'revoked', heartbeatFresh: false, localHealthy: false, publicReachable: false, publicStatus: null };
         }
         const probe = await probeTarget(targets.get(machine.targetID));
+        const failures = probe.reachable ? 0 : (probeFailureCounts.get(machine.targetID) || 0) + 1;
+        probeFailureCounts.set(machine.targetID, failures);
+        const probeReachable = failures < 2;
         const heartbeatTime = Date.parse(machine.lastHeartbeatAt || '');
         const heartbeatFresh = Number.isFinite(heartbeatTime) && Date.now() - heartbeatTime <= 90_000;
         const localHealthy = heartbeatFresh && machine.heartbeat?.localHealth === true;
         const state = machine.heartbeat?.lifecycle === 'stopped'
             ? 'stopped'
-            : heartbeatFresh && localHealthy && probe.reachable
+            : heartbeatFresh && localHealthy && probeReachable
                 ? 'online'
-                : heartbeatFresh || probe.reachable
+                : heartbeatFresh || probeReachable
                     ? 'degraded'
                     : 'offline';
         return {
@@ -172,7 +185,7 @@ async function machineStatuses(machines) {
             state,
             heartbeatFresh,
             localHealthy,
-            publicReachable: probe.reachable,
+            publicReachable: probeReachable,
             publicStatus: probe.statusCode,
         };
     }));

@@ -153,7 +153,7 @@ function allocateMachineAssignment({ request, snapshot, machines, transport }) {
     displayTargetName: staticTarget?.displayName || request.displayName,
     transport: {
       type: 'frp-ssh',
-      frpServerHost: '127.0.0.1',
+      frpServerHost: transport.frpsHost || '127.0.0.1',
       frpServerPort: transport.frpServerPort ?? 7000,
       localForwardPort: transport.localForwardPort ?? 17000,
       frpToken: transport.frpToken,

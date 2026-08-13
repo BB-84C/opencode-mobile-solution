@@ -208,7 +208,10 @@ The Dashboard always shows three explicit sections:
 
 Machine states are `online`, `degraded`, `offline`, `stopped`, or `revoked`. The relay decides them from
 both the outbound machine heartbeat and an authenticated VPS-side probe, so a local server
-cannot be mistaken for a working public connection.
+cannot be mistaken for a working public connection. The probe has a 4 s timeout, and a
+machine must fail two consecutive probes before it can flip from `online` to `degraded`, so a
+sub-minute data-plane blip (for example a client sync burst through the frp tunnel) does not
+flicker the dashboard. Recovery back to `online` is immediate on the first successful probe.
 
 The public machine endpoints are:
 
@@ -240,6 +243,7 @@ authenticated DELETE endpoint.
 | `PASSKEY_BOOTSTRAP_TOKEN` | None | Private first-registration secret; ignored after the first passkey exists |
 | `PAIRING_SOURCE_CLIENT_ID` | First configured client | Static client whose target and directory scope new phones inherit |
 | `FRPS_CONFIG_PATH` | `/etc/frp/frps.toml` | Protected FRP server configuration used to provision approved machines |
+| `FRP_SERVER_PUBLIC_HOST` | None | Public frps hostname/IP issued to newly enrolled machines so `frpc` can dial the server directly instead of through an SSH local forward; empty keeps the legacy two-layer transport |
 | `MACHINE_REMOTE_PORT_MIN` | `4100` | First dynamically allocated machine port |
 | `MACHINE_REMOTE_PORT_MAX` | `4199` | Last dynamically allocated machine port |
 ---

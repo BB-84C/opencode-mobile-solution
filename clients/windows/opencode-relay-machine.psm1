@@ -47,6 +47,10 @@ function Get-RelayMachineConfig {
         RelayOrigin = (& $readKnob 'OPENCODE_RELAY_ORIGIN' 'https://opencode.example.com').TrimEnd('/')
         SshAlias = & $readKnob 'OPENCODE_RELAY_SSH_ALIAS' 'opencode-vps'
         FrpcExecutable = & $readKnob 'OPENCODE_FRPC_EXE' "$env:LOCALAPPDATA\opencode-relay\frp\frpc.exe"
+        # Direct-data-plane mode: when set, frpc dials frps directly over this
+        # host and the SSH local-forward layer is skipped entirely. Empty keeps
+        # the legacy two-layer design (SSH -L to a loopback-only frps).
+        FrpDirectHost = & $readKnob 'OPENCODE_FRP_DIRECT_HOST' ''
         RequestedTargetID = & $readKnob 'OPENCODE_RELAY_REQUESTED_TARGET' $null
         RequestedRemotePort = & $readKnob 'OPENCODE_RELAY_REQUESTED_PORT' $null
         ConfigDir = $configDir
@@ -574,7 +578,7 @@ function Stop-RelaySupervisor {
     return [PSCustomObject]@{ Status = 'Stopped'; Warnings = @($warnings) }
 }
 
-# --- Managed tunnel (SSH local forward + FRPC) ----------------------------------
+# --- Managed tunnel (SSH local forward + FRPC, or direct FRPC) -----------------
 
 function Get-RelayManagedTunnelComponentStatus {
     param(
@@ -591,19 +595,34 @@ function Get-RelayManagedTunnelComponentStatus {
     }
 }
 
+function Test-RelayTunnelDirectMode {
+    param([Parameter(Mandatory)][psobject]$MachineConfig)
+    return -not [string]::IsNullOrWhiteSpace([string]$MachineConfig.FrpDirectHost)
+}
+
 function Get-RelayManagedTunnelStatus {
     param(
         [Parameter(Mandatory)][psobject]$MachineConfig,
         [scriptblock]$ProcessProvider
     )
 
-    $ssh = Get-RelayManagedTunnelComponentStatus -StatePath $MachineConfig.SshStatePath -ProcessProvider $ProcessProvider
+    $direct = Test-RelayTunnelDirectMode -MachineConfig $MachineConfig
     $frpc = Get-RelayManagedTunnelComponentStatus -StatePath $MachineConfig.FrpcStatePath -ProcessProvider $ProcessProvider
-    $status = if ($ssh.Status -eq 'Running' -and $frpc.Status -eq 'Running') { 'Running' }
-    elseif ($ssh.Status -eq 'Stopped' -and $frpc.Status -eq 'Stopped') { 'Stopped' }
-    else { 'Degraded' }
+    if ($direct) {
+        $ssh = [PSCustomObject]@{ Status = 'Skipped'; PID = $null }
+        $status = if ($frpc.Status -eq 'Running') { 'Running' }
+        elseif ($frpc.Status -eq 'Stopped') { 'Stopped' }
+        else { 'Degraded' }
+    }
+    else {
+        $ssh = Get-RelayManagedTunnelComponentStatus -StatePath $MachineConfig.SshStatePath -ProcessProvider $ProcessProvider
+        $status = if ($ssh.Status -eq 'Running' -and $frpc.Status -eq 'Running') { 'Running' }
+        elseif ($ssh.Status -eq 'Stopped' -and $frpc.Status -eq 'Stopped') { 'Stopped' }
+        else { 'Degraded' }
+    }
     return [PSCustomObject]@{
         Status = $status
+        Direct = $direct
         SSHPID = if ($ssh.Status -eq 'Running') { $ssh.PID } else { $null }
         FRPCPID = if ($frpc.Status -eq 'Running') { $frpc.PID } else { $null }
         Components = [PSCustomObject]@{ Ssh = $ssh; Frpc = $frpc }
@@ -685,27 +704,30 @@ function Start-RelayManagedTunnel {
     if (-not (Test-Path -LiteralPath $MachineConfig.FrpcConfigPath -PathType Leaf)) { throw 'FRPC configuration is missing; run authorization first.' }
     if (-not (Test-Path -LiteralPath $MachineConfig.FrpcExecutable -PathType Leaf)) { throw "FRPC executable was not found at $($MachineConfig.FrpcExecutable)." }
 
-    $sshExecutable = (Get-Command ssh.exe -ErrorAction Stop).Source
-    $sshArguments = @(
-        '-o', 'BatchMode=yes',
-        '-o', 'ExitOnForwardFailure=yes',
-        '-o', 'ServerAliveInterval=30',
-        '-o', 'ServerAliveCountMax=3',
-        '-o', 'ConnectTimeout=10',
-        '-N',
-        '-L', "$($credential.LocalForwardPort):127.0.0.1:$($credential.FrpServerPort)",
-        [string]$MachineConfig.SshAlias
-    )
-    $ssh = Start-RelayManagedTunnelComponent -MachineConfig $MachineConfig -StatePath $MachineConfig.SshStatePath -Executable $sshExecutable -Arguments $sshArguments -LogPrefix 'tunnel-ssh' -ProcessProvider $ProcessProvider -DaemonProvider $DaemonProvider -SleepProvider $SleepProvider
+    $direct = Test-RelayTunnelDirectMode -MachineConfig $MachineConfig
+    if (-not $direct) {
+        $sshExecutable = (Get-Command ssh.exe -ErrorAction Stop).Source
+        $sshArguments = @(
+            '-o', 'BatchMode=yes',
+            '-o', 'ExitOnForwardFailure=yes',
+            '-o', 'ServerAliveInterval=30',
+            '-o', 'ServerAliveCountMax=3',
+            '-o', 'ConnectTimeout=10',
+            '-N',
+            '-L', "$($credential.LocalForwardPort):127.0.0.1:$($credential.FrpServerPort)",
+            [string]$MachineConfig.SshAlias
+        )
+        $null = Start-RelayManagedTunnelComponent -MachineConfig $MachineConfig -StatePath $MachineConfig.SshStatePath -Executable $sshExecutable -Arguments $sshArguments -LogPrefix 'tunnel-ssh' -ProcessProvider $ProcessProvider -DaemonProvider $DaemonProvider -SleepProvider $SleepProvider
 
-    # Gate the data channel on control-channel readiness. In provider-mocked test
-    # mode (DaemonProvider present) no real forward exists; a test that wants to
-    # exercise this gate injects ForwardProbeProvider explicitly.
-    $forwardReady = if ($null -ne $ForwardProbeProvider) { [bool](& $ForwardProbeProvider $credential.LocalForwardPort) }
-    elseif ($null -eq $DaemonProvider) { Wait-RelaySshForwardReady -Port ([int]$credential.LocalForwardPort) -SleepProvider $SleepProvider }
-    else { $true }
-    if (-not $forwardReady) {
-        throw "SSH local forward on port $($credential.LocalForwardPort) did not accept connections; inspect $($MachineConfig.LogRoot) for the tunnel-ssh stderr log."
+        # Gate the data channel on control-channel readiness. In provider-mocked test
+        # mode (DaemonProvider present) no real forward exists; a test that wants to
+        # exercise this gate injects ForwardProbeProvider explicitly.
+        $forwardReady = if ($null -ne $ForwardProbeProvider) { [bool](& $ForwardProbeProvider $credential.LocalForwardPort) }
+        elseif ($null -eq $DaemonProvider) { Wait-RelaySshForwardReady -Port ([int]$credential.LocalForwardPort) -SleepProvider $SleepProvider }
+        else { $true }
+        if (-not $forwardReady) {
+            throw "SSH local forward on port $($credential.LocalForwardPort) did not accept connections; inspect $($MachineConfig.LogRoot) for the tunnel-ssh stderr log."
+        }
     }
 
     $frpc = Start-RelayManagedTunnelComponent -MachineConfig $MachineConfig -StatePath $MachineConfig.FrpcStatePath -Executable (Get-RelayNormalizedTunnelPath -Path $MachineConfig.FrpcExecutable) -Arguments @('-c', [string]$MachineConfig.FrpcConfigPath) -LogPrefix 'tunnel-frpc' -ProcessProvider $ProcessProvider -DaemonProvider $DaemonProvider -SleepProvider $SleepProvider
@@ -760,6 +782,9 @@ function Stop-RelayManagedTunnel {
 
     $warnings = [Collections.Generic.List[string]]::new()
     $frpcStopped = Stop-RelayManagedTunnelComponent -StatePath $MachineConfig.FrpcStatePath -LogPrefix 'tunnel-frpc' -ProcessProvider $ProcessProvider -SleepProvider $SleepProvider -Warnings $warnings
+    # The SSH layer is always cleaned up when a recorded state exists, even in
+    # direct mode: a machine migrated from the legacy two-layer design still owns
+    # its recorded ssh process, and leaving it behind would orphan the forward.
     $sshStopped = Stop-RelayManagedTunnelComponent -StatePath $MachineConfig.SshStatePath -LogPrefix 'tunnel-ssh' -ProcessProvider $ProcessProvider -SleepProvider $SleepProvider -Warnings $warnings
     return [PSCustomObject]@{
         Status = if ($frpcStopped -and $sshStopped) { 'Stopped' } else { 'Degraded' }

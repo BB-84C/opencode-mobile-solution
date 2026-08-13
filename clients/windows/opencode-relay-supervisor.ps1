@@ -27,7 +27,7 @@ Import-Module (Join-Path $PSScriptRoot 'opencode-relay-machine.psm1') -Force -Er
 # USER (registry) scope when handed no environment, which would ignore this
 # injection and could silently split the mutex.
 $processEnvironment = @{}
-foreach ($name in @('OPENCODE_SERVER_PORT', 'OPENCODE_SERVER_USERNAME', 'OPENCODE_SERVER_PASSWORD', 'OPENCODE_RELAY_ORIGIN', 'OPENCODE_RELAY_SSH_ALIAS', 'OPENCODE_FRPC_EXE', 'OPENCODE_RELAY_CONFIG_DIR', 'OPENCODE_RELAY_SUPERVISOR_INTERVAL_MS')) {
+foreach ($name in @('OPENCODE_SERVER_PORT', 'OPENCODE_SERVER_USERNAME', 'OPENCODE_SERVER_PASSWORD', 'OPENCODE_RELAY_ORIGIN', 'OPENCODE_RELAY_SSH_ALIAS', 'OPENCODE_FRPC_EXE', 'OPENCODE_FRP_DIRECT_HOST', 'OPENCODE_RELAY_CONFIG_DIR', 'OPENCODE_RELAY_SUPERVISOR_INTERVAL_MS')) {
     $value = [Environment]::GetEnvironmentVariable($name, 'Process')
     if ($null -ne $value) { $processEnvironment[$name] = $value }
 }

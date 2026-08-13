@@ -20,13 +20,13 @@ add those in your own copy if you want them.
 | `opencode-local.ps1` | The `--local` escape hatch: run the real `opencode` with no probes, no modules, no credential injection. |
 | `opencode-relay-server.ps1` | Lifecycle controller: `start` / `status` / `restart` / `stop` / `doctor` / `rename`, plus `restart tunnel`. |
 | `opencode-relay-common.psm1` | Shared library: config, health probes, state, mutex, listener/PID ownership, leases, start/restart machinery. |
-| `opencode-relay-machine.psm1` | Machine identity and transport (relay origin, SSH alias, FRP client config) resolution, plus the resident tunnel supervisor lifecycle (start/stop/status). |
-| `opencode-relay-supervisor.ps1` | Resident watchdog loop that re-establishes the SSH+FRP tunnel after a transient network drop (VPN/NAT teardown, connection reset), under the controller's shared mutex, without ever touching the local backend. Launched by `start`, stopped first by `stop`/`restart`. |
+| `opencode-relay-machine.psm1` | Machine identity and transport (relay origin, SSH alias, FRP client config, direct-data-plane mode) resolution, plus the resident tunnel supervisor lifecycle (start/stop/status). |
+| `opencode-relay-supervisor.ps1` | Resident watchdog loop that re-establishes the FRP tunnel after a transient network drop (VPN/NAT teardown, connection reset), under the controller's shared mutex, without ever touching the local backend. Launched by `start`, stopped first by `stop`/`restart`. |
 | `opencode-machine-auth.mjs` | OAuth device-authorization client: enroll this machine with the relay and persist a revocable machine credential. |
 | `opencode-machine-agent.mjs` / `opencode-machine-agent`-side calls | Heartbeat agent reporting local backend health to the relay. |
 | `opencode-daemon-launcher.mjs` | Cross-platform helper that spawns detached background processes. |
 | `opencode-serve-attach.ps1` | Serve/attach helper used by the controller. |
-| `opencode-frp-tunnel.ps1` | FRP tunnel (SSH local-forward + `frpc`), the recommended transport on Windows. |
+| `opencode-frp-tunnel.ps1` | FRP tunnel (SSH local-forward + `frpc`); kept for machines that still use the legacy two-layer transport. The managed tunnel in `opencode-relay-machine.psm1` prefers direct frpc-to-frps when `OPENCODE_FRP_DIRECT_HOST` is set. |
 | `opencode-tunnel.ps1` | Alternative plain SSH reverse tunnel daemon. |
 
 ## Prerequisites
@@ -73,7 +73,8 @@ dashboard.
 |----------|---------|
 | `OPENCODE_REAL_CMD` | Path to the real `opencode` launcher. |
 | `OPENCODE_RELAY_ORIGIN` | Your relay's public HTTPS origin. |
-| `OPENCODE_RELAY_SSH_ALIAS` | SSH host alias for the tunnel. |
+| `OPENCODE_RELAY_SSH_ALIAS` | SSH host alias for the legacy two-layer tunnel. |
+| `OPENCODE_FRP_DIRECT_HOST` | Public frps host. When set, `frpc` dials the FRP server directly and the SSH local-forward layer is skipped entirely. |
 | `OPENCODE_SERVER_PORT` | Local backend port (default `4096`). |
 | `OPENCODE_FRPC_EXE` | Path to `frpc.exe`. |
 | `OPENCODE_RELAY_SUPERVISOR_INTERVAL_MS` | Tunnel supervisor heal-check cadence in ms (default `30000`, floor `10000`). |

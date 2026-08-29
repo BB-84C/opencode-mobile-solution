@@ -43,7 +43,17 @@ async function fixture() {
       remotePortMin: 4100,
       remotePortMax: 4199,
     },
-    getMachineStatuses: async (machines) => machines.map((machine) => ({ ...machine, state: 'online', localHealthy: true, publicReachable: true })),
+    getMachineStatuses: async (machines) => machines.map((machine) => ({
+      ...machine,
+      state: 'online',
+      localHealthy: true,
+      publicProbeReachable: true,
+      publicReachable: true,
+      probeFailureCount: 0,
+      checkedAt: '2026-08-29T12:00:00.000Z',
+      publicStatus: 200,
+      sentinelSecret: 'must-not-leak',
+    })),
     pairingSourceClientID: 'owner',
     onDeviceRevoked: (clientID) => { revokedClientID = clientID; },
     onMachineRevoked: (machine) => { revokedMachineID = machine.machineID; },
@@ -283,7 +293,16 @@ test('completes machine OAuth, synchronizes its name in both directions, and rev
     body: JSON.stringify({ localHealth: true, opencodeVersion: '1.17.18', controllerVersion: '2' }),
   });
   assert.equal(heartbeat.status, 200);
-  assert.equal((await heartbeat.json()).machine.displayName, 'Desk Mac');
+  const heartbeatPayload = await heartbeat.json();
+  assert.deepEqual(Object.keys(heartbeatPayload.relayStatus).sort(), [
+    'checkedAt',
+    'probeFailureCount',
+    'publicProbeReachable',
+    'publicReachable',
+    'publicStatus',
+  ]);
+  assert.equal(heartbeatPayload.relayStatus.publicProbeReachable, true);
+  assert.equal(JSON.stringify(heartbeatPayload).includes('must-not-leak'), false);
   const me = await fetch(`${baseUrl}/api/machine/me`, {
     headers: { Authorization: `Bearer ${token.access_token}` },
   });

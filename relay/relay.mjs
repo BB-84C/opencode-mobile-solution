@@ -29,6 +29,7 @@ import path from 'node:path';
 import { authenticateBearer, resolveScope } from './lib/auth.mjs';
 import { startConfigReloader } from './lib/config.mjs';
 import { createPasskeyPairing } from './lib/passkey-pairing.mjs';
+import { createMachineStatusMonitor } from './lib/machine-status-monitor.mjs';
 import { proxyRequest } from './lib/proxy.mjs';
 
 // ── Config ────────────────────────────────────────────────────
@@ -155,29 +156,28 @@ function probeTarget(target) {
     });
 }
 
-// targetID -> number of consecutive failed probes. Debounces the online ->
-// degraded transition so sub-minute data-plane blips (for example an app sync
-// burst knocking the frp work pool) do not flicker the dashboard.
-const probeFailureCounts = new Map();
+let machineStatusMonitor;
 
 async function machineStatuses(machines) {
-    const targets = targetRegistry();
-    return Promise.all(machines.map(async (machine) => {
+    return machines.map((machine) => {
         if (machine.revokedAt) {
-            return { ...machine, state: 'revoked', heartbeatFresh: false, localHealthy: false, publicReachable: false, publicStatus: null };
+            return {
+                ...machine,
+                state: 'revoked',
+                heartbeatFresh: false,
+                localHealthy: false,
+                ...machineStatusMonitor.getStatus(machine.targetID),
+            };
         }
-        const probe = await probeTarget(targets.get(machine.targetID));
-        const failures = probe.reachable ? 0 : (probeFailureCounts.get(machine.targetID) || 0) + 1;
-        probeFailureCounts.set(machine.targetID, failures);
-        const probeReachable = failures < 2;
+        const relayStatus = machineStatusMonitor.getStatus(machine.targetID);
         const heartbeatTime = Date.parse(machine.lastHeartbeatAt || '');
         const heartbeatFresh = Number.isFinite(heartbeatTime) && Date.now() - heartbeatTime <= 90_000;
         const localHealthy = heartbeatFresh && machine.heartbeat?.localHealth === true;
         const state = machine.heartbeat?.lifecycle === 'stopped'
             ? 'stopped'
-            : heartbeatFresh && localHealthy && probeReachable
+            : heartbeatFresh && localHealthy && relayStatus.publicReachable === true
                 ? 'online'
-                : heartbeatFresh || probeReachable
+                : heartbeatFresh || relayStatus.publicReachable === true
                     ? 'degraded'
                     : 'offline';
         return {
@@ -185,10 +185,9 @@ async function machineStatuses(machines) {
             state,
             heartbeatFresh,
             localHealthy,
-            publicReachable: probeReachable,
-            publicStatus: probe.statusCode,
+            ...relayStatus,
         };
-    }));
+    });
 }
 
 passkeyPairing = createPasskeyPairing({
@@ -201,6 +200,15 @@ passkeyPairing = createPasskeyPairing({
     getMachineStatuses: machineStatuses,
     onDeviceRevoked: closeStreamsForClient,
     onMachineRevoked: (machine) => closeStreamsForTarget(machine.targetID),
+});
+
+machineStatusMonitor = createMachineStatusMonitor({
+    getTargets: targetRegistry,
+    probeTarget,
+    onError: (error) => console.error(`[relay] WARNING: target monitor refresh failed: ${error.message}`),
+});
+void machineStatusMonitor.start().catch((error) => {
+    console.error(`[relay] WARNING: initial target monitor refresh failed: ${error.message}`);
 });
 
 function authenticateClient(snapshot, token) {
@@ -323,6 +331,7 @@ let shuttingDown = false;
 async function shutdown() {
     if (shuttingDown) return;
     shuttingDown = true;
+    machineStatusMonitor.close();
     configReloader.close();
     for (const active of activeStreamsByClient.values()) {
         for (const entry of active) entry.close();

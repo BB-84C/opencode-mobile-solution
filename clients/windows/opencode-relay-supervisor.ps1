@@ -27,7 +27,7 @@ Import-Module (Join-Path $PSScriptRoot 'opencode-relay-machine.psm1') -Force -Er
 # USER (registry) scope when handed no environment, which would ignore this
 # injection and could silently split the mutex.
 $processEnvironment = @{}
-foreach ($name in @('OPENCODE_SERVER_PORT', 'OPENCODE_SERVER_USERNAME', 'OPENCODE_SERVER_PASSWORD', 'OPENCODE_RELAY_ORIGIN', 'OPENCODE_RELAY_SSH_ALIAS', 'OPENCODE_FRPC_EXE', 'OPENCODE_FRP_DIRECT_HOST', 'OPENCODE_RELAY_CONFIG_DIR', 'OPENCODE_RELAY_SUPERVISOR_INTERVAL_MS')) {
+foreach ($name in @('OPENCODE_SERVER_PORT', 'OPENCODE_SERVER_USERNAME', 'OPENCODE_SERVER_PASSWORD', 'OPENCODE_RELAY_ORIGIN', 'OPENCODE_RELAY_SSH_ALIAS', 'OPENCODE_FRPC_EXE', 'OPENCODE_FRP_DIRECT_HOST', 'OPENCODE_RELAY_CONFIG_DIR', 'OPENCODE_RELAY_SUPERVISOR_INTERVAL_MS', 'OPENCODE_MACHINE_HEARTBEAT_MS')) {
     $value = [Environment]::GetEnvironmentVariable($name, 'Process')
     if ($null -ne $value) { $processEnvironment[$name] = $value }
 }
@@ -77,6 +77,13 @@ function Test-RelaySupervisorStopRequested {
 }
 
 $lastHealAt = $null
+if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+    try {
+        $priorStatus = [IO.File]::ReadAllText($statusPath) | ConvertFrom-Json -ErrorAction Stop
+        if ($null -ne $priorStatus.PSObject.Properties['lastHealAt']) { $lastHealAt = $priorStatus.lastHealAt }
+    }
+    catch { }
+}
 Write-RelaySupervisorStatus -Path $statusPath -State 'Running' -TunnelStatus 'startup' -LastHealAt $lastHealAt
 
 while ($true) {
@@ -84,16 +91,25 @@ while ($true) {
 
     try {
         $tunnelStatus = 'unknown'
-        try {
-            $tunnel = Get-RelayManagedTunnelStatus -MachineConfig $machineConfig -ProcessProvider $null
-            $tunnelStatus = [string]$tunnel.Status
+        $decision = $null
+        # Every iteration starts from an empty snapshot. A status exception must
+        # never leave the previous iteration's tunnel object eligible for repair.
+        $snapshot = Get-RelaySupervisorHealthSnapshot -TunnelStatusProvider {
+            Get-RelayManagedTunnelStatus -MachineConfig $machineConfig -ProcessProvider $null
+        } -AgentStatusProvider {
+            Get-RelayMachineAgentStatus -MachineConfig $machineConfig -ProcessProvider $null
         }
-        catch {
-            Write-RelaySupervisorStatus -Path $statusPath -State 'Running' -TunnelStatus 'error' -LastError ("status: " + [string]$_.Exception.Message) -LastHealAt $lastHealAt
-            $tunnelStatus = 'error'
+        if (-not $snapshot.Valid) {
+            Write-RelaySupervisorStatus -Path $statusPath -State 'Running' -TunnelStatus 'error' -LastError ([string]$snapshot.Error) -LastHealAt $lastHealAt
+        }
+        else {
+            $tunnelStatus = [string]$snapshot.Tunnel.Status
+            $now = [datetime]::UtcNow
+            $suppressed = Test-RelayTunnelMutationSuppressed -MachineConfig $machineConfig -Now $now
+            $decision = Get-RelaySupervisorRecoveryDecision -Tunnel $snapshot.Tunnel -Agent $snapshot.Agent -LastHealAt $lastHealAt -Now $now -MutationSuppressed $suppressed
         }
 
-        if ($tunnelStatus -eq 'Degraded' -or $tunnelStatus -eq 'Stopped') {
+        if ($snapshot.Valid -and $decision.Eligible) {
             try {
                 # Heal under the shared mutex so a user start/stop/restart is never
                 # raced. If the mutex is held (a user command is running) the
@@ -101,20 +117,41 @@ while ($true) {
                 $healed = Use-RelayMutex -Config $config -TimeoutMs $mutexHealTimeoutMs -ScriptBlock {
                     # A stop requested while we waited for the mutex wins: do not heal.
                     if (Test-Path -LiteralPath $stopSentinel -PathType Leaf) { return $false }
-                    $recheck = Get-RelayManagedTunnelStatus -MachineConfig $machineConfig -ProcessProvider $null
-                    if ([string]$recheck.Status -eq 'Running') { return $false }
-                    $null = Start-RelayManagedTunnel -Config $config -MachineConfig $machineConfig -ProcessProvider $null -DaemonProvider $null -SleepProvider $null
+                    $recheck = Get-RelaySupervisorHealthSnapshot -TunnelStatusProvider {
+                        Get-RelayManagedTunnelStatus -MachineConfig $machineConfig -ProcessProvider $null
+                    } -AgentStatusProvider {
+                        Get-RelayMachineAgentStatus -MachineConfig $machineConfig -ProcessProvider $null
+                    }
+                    if (-not $recheck.Valid) { return $false }
+                    $recheckNow = [datetime]::UtcNow
+                    $recheckSuppressed = Test-RelayTunnelMutationSuppressed -MachineConfig $machineConfig -Now $recheckNow
+                    $recheckDecision = Get-RelaySupervisorRecoveryDecision -Tunnel $recheck.Tunnel -Agent $recheck.Agent -LastHealAt $lastHealAt -Now $recheckNow -MutationSuppressed $recheckSuppressed
+                    if (-not $recheckDecision.Eligible) { return $false }
+                    if ($recheckDecision.RestartTunnel -and [string]$recheck.Tunnel.Status -ne 'Stopped') {
+                        $null = Stop-RelayManagedTunnel -MachineConfig $machineConfig -ProcessProvider $null -SleepProvider $null
+                    }
+                    if ($recheckDecision.RestartTunnel) {
+                        $null = Start-RelayManagedTunnel -Config $config -MachineConfig $machineConfig -ProcessProvider $null -DaemonProvider $null -SleepProvider $null
+                    }
+                    if ($recheckDecision.StartAgent) {
+                        $null = Start-RelayMachineAgent -Config $config -MachineConfig $machineConfig -ProcessProvider $null -DaemonProvider $null -SleepProvider $null
+                    }
                     return $true
                 }
                 if ($healed) { $lastHealAt = [datetime]::UtcNow.ToString('o') }
-                $post = Get-RelayManagedTunnelStatus -MachineConfig $machineConfig -ProcessProvider $null
-                Write-RelaySupervisorStatus -Path $statusPath -State 'Running' -TunnelStatus ([string]$post.Status) -LastHealAt $lastHealAt
+                $post = Get-RelaySupervisorHealthSnapshot -TunnelStatusProvider {
+                    Get-RelayManagedTunnelStatus -MachineConfig $machineConfig -ProcessProvider $null
+                } -AgentStatusProvider {
+                    Get-RelayMachineAgentStatus -MachineConfig $machineConfig -ProcessProvider $null
+                }
+                $postStatus = if ($post.Valid) { [string]$post.Tunnel.Status } else { 'error' }
+                Write-RelaySupervisorStatus -Path $statusPath -State 'Running' -TunnelStatus $postStatus -LastError $(if ($post.Valid) { $null } else { [string]$post.Error }) -LastHealAt $lastHealAt
             }
             catch {
                 Write-RelaySupervisorStatus -Path $statusPath -State 'Running' -TunnelStatus $tunnelStatus -LastError ("heal: " + [string]$_.Exception.Message) -LastHealAt $lastHealAt
             }
         }
-        else {
+        elseif ($snapshot.Valid) {
             Write-RelaySupervisorStatus -Path $statusPath -State 'Running' -TunnelStatus $tunnelStatus -LastHealAt $lastHealAt
         }
     }

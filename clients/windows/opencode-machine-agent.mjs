@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { projectRelayStatus } from './relay-status-contract.mjs';
 
 const home = os.homedir();
 const configDirectory = process.env.OPENCODE_RELAY_CONFIG_DIR || path.join(home, '.config', 'opencode-relay');
@@ -81,19 +82,21 @@ async function heartbeat(lifecycle = 'running') {
       signal: AbortSignal.timeout(10_000),
     });
   } catch (error) {
-    atomicWrite(statusPath, `${JSON.stringify({ schema: 1, status: 'RelayUnavailable', localHealth: health.localHealth, lastError: error.message, updatedAt: new Date().toISOString() })}\n`);
+    atomicWrite(statusPath, `${JSON.stringify({ schema: 1, status: 'RelayUnavailable', localHealth: health.localHealth, relayStatus: projectRelayStatus(null), relayStatusObservedAt: null, lastError: error.message, updatedAt: new Date().toISOString() })}\n`);
     return;
   }
   const value = await response.json().catch(() => ({}));
+  const relayStatusObservedAt = new Date().toISOString();
+  const relayStatus = projectRelayStatus(value.relayStatus);
   if (response.status === 401) {
-    atomicWrite(statusPath, `${JSON.stringify({ schema: 1, status: 'Revoked', localHealth: health.localHealth, lastError: value.message || value.error, updatedAt: new Date().toISOString() })}\n`);
+    atomicWrite(statusPath, `${JSON.stringify({ schema: 1, status: 'Revoked', localHealth: health.localHealth, relayStatus, relayStatusObservedAt, lastError: value.message || value.error, updatedAt: new Date().toISOString() })}\n`);
     process.exitCode = 6;
     revoked = true;
     stopping = true;
     return;
   }
   const status = response.ok ? (lifecycle === 'stopped' ? 'Stopped' : 'Ready') : 'RelayError';
-  atomicWrite(statusPath, `${JSON.stringify({ schema: 1, status, localHealth: health.localHealth, relayHTTP: response.status, lastError: response.ok ? null : (value.message || value.error), updatedAt: new Date().toISOString() })}\n`);
+  atomicWrite(statusPath, `${JSON.stringify({ schema: 1, status, localHealth: health.localHealth, relayStatus, relayStatusObservedAt, relayHTTP: response.status, lastError: response.ok ? null : (value.message || value.error), updatedAt: new Date().toISOString() })}\n`);
 }
 
 async function sleepUntilHeartbeat() {

@@ -401,6 +401,7 @@ test('rejects a v2 client directory outside its allowlist with 403', async (t) =
       },
     },
   });
+  const probeRequestCount = upstream.requests.length;
   const response = await request({
     port: relay.port,
     pathname: '/directory',
@@ -408,7 +409,7 @@ test('rejects a v2 client directory outside its allowlist with 403', async (t) =
   });
 
   assert.equal(response.statusCode, 403);
-  assert.equal(upstream.requests.length, 0);
+  assert.equal(upstream.requests.length, probeRequestCount);
 });
 
 test('rejects a disallowed directory supplied through the OpenCode query parameter', async (t) => {
@@ -437,6 +438,7 @@ test('rejects a disallowed directory supplied through the OpenCode query paramet
       },
     },
   });
+  const probeRequestCount = upstream.requests.length;
   const response = await request({
     port: relay.port,
     pathname: '/session?directory=%2Fvault%2Fdisallowed',
@@ -444,7 +446,7 @@ test('rejects a disallowed directory supplied through the OpenCode query paramet
   });
 
   assert.equal(response.statusCode, 403);
-  assert.equal(upstream.requests.length, 0);
+  assert.equal(upstream.requests.length, probeRequestCount);
 });
 
 test('discovers only authorized machines and routes an explicit target without exposing credentials', async (t) => {
@@ -485,6 +487,7 @@ test('discovers only authorized machines and routes an explicit target without e
     },
     upstreamPortOverride: Number(new URL(windows.url).port),
   });
+  const windowsProbeRequestCount = windows.requests.length;
 
   const discovery = await request({ port: relay.port, pathname: '/relay/targets', headers: bearer('owner-token') });
   assert.equal(discovery.statusCode, 200);
@@ -504,7 +507,7 @@ test('discovers only authorized machines and routes an explicit target without e
   });
   assert.equal(response.statusCode, 200);
   assert.equal(mac.requests.at(-1).url, '/global/health');
-  assert.equal(windows.requests.length, 0);
+  assert.equal(windows.requests.length, windowsProbeRequestCount);
 
   const forbidden = await request({
     port: relay.port,

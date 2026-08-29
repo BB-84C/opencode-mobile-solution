@@ -17,7 +17,7 @@ function Get-RelayMachineConfig {
 
     if ($null -eq $UserEnvironment) {
         $UserEnvironment = @{}
-        foreach ($name in @('OPENCODE_RELAY_ORIGIN', 'OPENCODE_RELAY_SSH_ALIAS', 'OPENCODE_FRPC_EXE', 'OPENCODE_RELAY_CONFIG_DIR', 'OPENCODE_RELAY_REQUESTED_TARGET', 'OPENCODE_RELAY_REQUESTED_PORT', 'OPENCODE_RELAY_SUPERVISOR_INTERVAL_MS')) {
+        foreach ($name in @('OPENCODE_RELAY_ORIGIN', 'OPENCODE_RELAY_SSH_ALIAS', 'OPENCODE_FRPC_EXE', 'OPENCODE_FRP_DIRECT_HOST', 'OPENCODE_RELAY_CONFIG_DIR', 'OPENCODE_RELAY_REQUESTED_TARGET', 'OPENCODE_RELAY_REQUESTED_PORT', 'OPENCODE_RELAY_SUPERVISOR_INTERVAL_MS', 'OPENCODE_MACHINE_HEARTBEAT_MS')) {
             $value = Get-UserEnvironmentValue -Name $name
             if ($null -ne $value) { $UserEnvironment[$name] = $value }
         }
@@ -40,6 +40,14 @@ function Get-RelayMachineConfig {
         $parsedSupervisorInterval = 0
         if ([int]::TryParse($supervisorIntervalKnob, [ref]$parsedSupervisorInterval) -and $parsedSupervisorInterval -ge 10000) {
             $supervisorIntervalMs = $parsedSupervisorInterval
+        }
+    }
+    $heartbeatIntervalMs = 30000
+    $heartbeatIntervalKnob = & $readKnob 'OPENCODE_MACHINE_HEARTBEAT_MS' ''
+    if (-not [string]::IsNullOrWhiteSpace($heartbeatIntervalKnob)) {
+        $parsedHeartbeatInterval = 0
+        if ([int]::TryParse($heartbeatIntervalKnob, [ref]$parsedHeartbeatInterval) -and $parsedHeartbeatInterval -ge 10000) {
+            $heartbeatIntervalMs = $parsedHeartbeatInterval
         }
     }
 
@@ -70,7 +78,9 @@ function Get-RelayMachineConfig {
         SupervisorStatePath = Join-Path $stateRoot 'tunnel-supervisor-process.json'
         SupervisorStatusPath = Join-Path $stateRoot 'tunnel-supervisor-status.json'
         SupervisorStopSentinelPath = Join-Path $stateRoot 'tunnel-supervisor-stop.request'
+        TunnelMutationSuppressionPath = Join-Path $stateRoot 'tunnel-mutation-suppression.json'
         SupervisorIntervalMs = $supervisorIntervalMs
+        HeartbeatIntervalMs = $heartbeatIntervalMs
     }
 }
 
@@ -340,6 +350,7 @@ function Start-RelayMachineAgent {
         OPENCODE_RELAY_CONFIG_DIR = [string]$MachineConfig.ConfigDir
         OPENCODE_MACHINE_AGENT_STATUS = [string]$MachineConfig.AgentStatusPath
         OPENCODE_MACHINE_AGENT_STOP = [string]$MachineConfig.AgentStopSentinelPath
+        OPENCODE_MACHINE_HEARTBEAT_MS = [string][int]$MachineConfig.HeartbeatIntervalMs
     }
     $agentPid = Start-RelayMachineDaemonProcess -MachineConfig $MachineConfig -Executable $nodeExecutable -Arguments @([string]$MachineConfig.AgentModule) -LogPrefix 'machine-agent' -EnvMap $envMap -DaemonProvider $DaemonProvider
     $info = Wait-RelayMachineProcessCapture -ProcessId $agentPid -ExpectedExecutable $nodeExecutable -ProcessProvider $ProcessProvider -SleepProvider $SleepProvider -LogRoot ([string]$MachineConfig.LogRoot)
@@ -501,7 +512,9 @@ function Start-RelaySupervisor {
         OPENCODE_RELAY_ORIGIN = [string]$MachineConfig.RelayOrigin
         OPENCODE_RELAY_SSH_ALIAS = [string]$MachineConfig.SshAlias
         OPENCODE_FRPC_EXE = [string]$MachineConfig.FrpcExecutable
+        OPENCODE_FRP_DIRECT_HOST = [string]$MachineConfig.FrpDirectHost
         OPENCODE_RELAY_SUPERVISOR_INTERVAL_MS = [string][int]$MachineConfig.SupervisorIntervalMs
+        OPENCODE_MACHINE_HEARTBEAT_MS = [string][int]$MachineConfig.HeartbeatIntervalMs
     }
     $arguments = @('-NoProfile', '-NoLogo', '-File', [string]$MachineConfig.SupervisorModule)
     if ($null -ne $DaemonProvider) {
@@ -603,29 +616,231 @@ function Test-RelayTunnelDirectMode {
 function Get-RelayManagedTunnelStatus {
     param(
         [Parameter(Mandatory)][psobject]$MachineConfig,
-        [scriptblock]$ProcessProvider
+        [scriptblock]$ProcessProvider,
+        [scriptblock]$NowProvider
     )
 
+    $now = if ($null -ne $NowProvider) { (& $NowProvider).ToUniversalTime() } else { [datetime]::UtcNow }
     $direct = Test-RelayTunnelDirectMode -MachineConfig $MachineConfig
     $frpc = Get-RelayManagedTunnelComponentStatus -StatePath $MachineConfig.FrpcStatePath -ProcessProvider $ProcessProvider
     if ($direct) {
         $ssh = [PSCustomObject]@{ Status = 'Skipped'; PID = $null }
-        $status = if ($frpc.Status -eq 'Running') { 'Running' }
-        elseif ($frpc.Status -eq 'Stopped') { 'Stopped' }
-        else { 'Degraded' }
     }
     else {
         $ssh = Get-RelayManagedTunnelComponentStatus -StatePath $MachineConfig.SshStatePath -ProcessProvider $ProcessProvider
-        $status = if ($ssh.Status -eq 'Running' -and $frpc.Status -eq 'Running') { 'Running' }
-        elseif ($ssh.Status -eq 'Stopped' -and $frpc.Status -eq 'Stopped') { 'Stopped' }
-        else { 'Degraded' }
+    }
+
+    $requiredComponents = if ($direct) { @($frpc) } else { @($ssh, $frpc) }
+    $staleComponent = @($requiredComponents | Where-Object { $_.Status -eq 'Stale' }).Count -gt 0
+    $absentComponent = @($requiredComponents | Where-Object { $_.Status -eq 'Stopped' }).Count -gt 0
+    $allAbsent = @($requiredComponents | Where-Object { $_.Status -ne 'Stopped' }).Count -eq 0
+    $status = 'Degraded'
+    $reason = 'relay_status_missing'
+    $recoveryRequired = $false
+    $relayStatus = $null
+    $observedAtText = $null
+
+    if ($staleComponent) {
+        $reason = 'process_identity_stale'
+        $recoveryRequired = $true
+    }
+    elseif ($absentComponent) {
+        $status = if ($allAbsent) { 'Stopped' } else { 'Degraded' }
+        $reason = 'process_absent'
+        $recoveryRequired = $true
+    }
+    else {
+        $agentStatus = $null
+        if (Test-Path -LiteralPath $MachineConfig.AgentStatusPath -PathType Leaf) {
+            try { $agentStatus = [IO.File]::ReadAllText($MachineConfig.AgentStatusPath) | ConvertFrom-Json -ErrorAction Stop } catch { }
+        }
+        if ($null -ne $agentStatus -and $null -ne $agentStatus.PSObject.Properties['relayStatus']) { $relayStatus = $agentStatus.relayStatus }
+        if ($null -ne $agentStatus -and $null -ne $agentStatus.PSObject.Properties['relayStatusObservedAt']) {
+            $observedAtText = ConvertTo-RelayMachineUtcText -Value $agentStatus.relayStatusObservedAt
+        }
+
+        if ($null -eq $relayStatus -or [string]::IsNullOrWhiteSpace([string]$observedAtText)) {
+            $reason = 'relay_status_missing'
+        }
+        else {
+            $observedAt = [datetime]::MinValue
+            $parsedObservedAt = [datetime]::TryParse($observedAtText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$observedAt)
+            $heartbeatIntervalMs = if ($null -ne $MachineConfig.PSObject.Properties['HeartbeatIntervalMs']) { [int]$MachineConfig.HeartbeatIntervalMs } else { 30000 }
+            $freshnessMs = [Math]::Max(90000, 3 * $heartbeatIntervalMs)
+            if (-not $parsedObservedAt -or $observedAt.ToUniversalTime() -gt $now.AddSeconds(5) -or ($now - $observedAt.ToUniversalTime()).TotalMilliseconds -gt $freshnessMs) {
+                $reason = 'relay_status_stale'
+            }
+            elseif ($relayStatus.publicProbeReachable -ne $true) {
+                $reason = 'relay_probe_failed'
+                $recoveryRequired = ([int]($relayStatus.probeFailureCount ?? 0) -ge 2)
+            }
+            else {
+                $status = 'Running'
+                $reason = 'running'
+            }
+        }
     }
     return [PSCustomObject]@{
         Status = $status
+        Reason = $reason
+        RecoveryRequired = $recoveryRequired
         Direct = $direct
         SSHPID = if ($ssh.Status -eq 'Running') { $ssh.PID } else { $null }
         FRPCPID = if ($frpc.Status -eq 'Running') { $frpc.PID } else { $null }
         Components = [PSCustomObject]@{ Ssh = $ssh; Frpc = $frpc }
+        RelayStatus = $relayStatus
+        RelayStatusObservedAt = $observedAtText
+    }
+}
+
+function Set-RelayTunnelMutationSuppression {
+    param(
+        [Parameter(Mandatory)][psobject]$MachineConfig,
+        [ValidateRange(10000, 180000)][int]$DurationMs = 90000,
+        [scriptblock]$NowProvider
+    )
+    if ($null -eq $MachineConfig.PSObject.Properties['TunnelMutationSuppressionPath']) { return }
+    $now = if ($null -ne $NowProvider) { (& $NowProvider).ToUniversalTime() } else { [datetime]::UtcNow }
+    Write-RelayMachineStateFile -Path ([string]$MachineConfig.TunnelMutationSuppressionPath) -Value ([PSCustomObject]@{
+        schema = 1
+        createdAt = $now.ToString('o')
+        expiresAt = $now.AddMilliseconds($DurationMs).ToString('o')
+    })
+}
+
+function Clear-RelayTunnelMutationSuppression {
+    param([Parameter(Mandatory)][psobject]$MachineConfig)
+    if ($null -ne $MachineConfig.PSObject.Properties['TunnelMutationSuppressionPath']) {
+        Remove-Item -LiteralPath ([string]$MachineConfig.TunnelMutationSuppressionPath) -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-RelayTunnelMutationSuppressed {
+    param(
+        [Parameter(Mandatory)][psobject]$MachineConfig,
+        [datetime]$Now = [datetime]::UtcNow
+    )
+    if ($null -eq $MachineConfig.PSObject.Properties['TunnelMutationSuppressionPath']) { return $false }
+    $path = [string]$MachineConfig.TunnelMutationSuppressionPath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    try { $marker = [IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop } catch { return $false }
+    $expiresAt = [datetime]::MinValue
+    $expiresAtText = if ($null -ne $marker.PSObject.Properties['expiresAt']) { ConvertTo-RelayMachineUtcText -Value $marker.expiresAt } else { $null }
+    if ([string]::IsNullOrWhiteSpace([string]$expiresAtText) -or -not [datetime]::TryParse([string]$expiresAtText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$expiresAt)) { return $false }
+    return $Now.ToUniversalTime() -lt $expiresAt.ToUniversalTime()
+}
+
+function Test-RelayTunnelConvergenceSample {
+    param(
+        [Parameter(Mandatory)][psobject]$Tunnel,
+        [datetime]$ObservedNotBefore = [datetime]::MinValue
+    )
+    if ([string]$Tunnel.Status -ne 'Running') { return $false }
+    if ($ObservedNotBefore -eq [datetime]::MinValue) { return $true }
+    $sampleAt = [datetime]::MinValue
+    $sampleAtText = ConvertTo-RelayMachineUtcText -Value $Tunnel.RelayStatusObservedAt
+    if ([string]::IsNullOrWhiteSpace([string]$sampleAtText) -or -not [datetime]::TryParse([string]$sampleAtText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$sampleAt)) { return $false }
+    return $sampleAt.ToUniversalTime() -ge $ObservedNotBefore.ToUniversalTime().AddSeconds(-1)
+}
+
+function Wait-RelayTunnelConverged {
+    param(
+        [Parameter(Mandatory)][psobject]$MachineConfig,
+        [scriptblock]$ProcessProvider,
+        [scriptblock]$SleepProvider,
+        [scriptblock]$NowProvider,
+        [ValidateRange(10000, 180000)][int]$TimeoutMs = 90000,
+        [ValidateRange(100, 10000)][int]$PollMs = 1000,
+        [datetime]$ObservedNotBefore = [datetime]::MinValue
+    )
+
+    $getNow = { if ($null -ne $NowProvider) { (& $NowProvider).ToUniversalTime() } else { [datetime]::UtcNow } }
+    $deadline = (& $getNow).AddMilliseconds($TimeoutMs)
+    do {
+        $tunnel = Get-RelayManagedTunnelStatus -MachineConfig $MachineConfig -ProcessProvider $ProcessProvider -NowProvider $NowProvider
+        if (Test-RelayTunnelConvergenceSample -Tunnel $tunnel -ObservedNotBefore $ObservedNotBefore) {
+            Clear-RelayTunnelMutationSuppression -MachineConfig $MachineConfig
+            return $tunnel
+        }
+        if ((& $getNow) -ge $deadline) { break }
+        if ($null -ne $SleepProvider) { & $SleepProvider $PollMs } else { Start-Sleep -Milliseconds $PollMs }
+    } while ($true)
+
+    # The deadline boundary gets one final semantic poll. A success that arrived
+    # during the last sleep is success, not a timeout.
+    $last = Get-RelayManagedTunnelStatus -MachineConfig $MachineConfig -ProcessProvider $ProcessProvider -NowProvider $NowProvider
+    if (Test-RelayTunnelConvergenceSample -Tunnel $last -ObservedNotBefore $ObservedNotBefore) {
+        Clear-RelayTunnelMutationSuppression -MachineConfig $MachineConfig
+        return $last
+    }
+    Clear-RelayTunnelMutationSuppression -MachineConfig $MachineConfig
+    return [PSCustomObject]@{
+        Status = 'Degraded'; Reason = 'relay_probe_convergence_timeout'; RecoveryRequired = [bool]$last.RecoveryRequired
+        Direct = $last.Direct; SSHPID = $last.SSHPID; FRPCPID = $last.FRPCPID; Components = $last.Components
+        RelayStatus = $last.RelayStatus; RelayStatusObservedAt = $last.RelayStatusObservedAt
+    }
+}
+
+function Test-RelaySupervisorHealEligibility {
+    param(
+        [Parameter(Mandatory)][psobject]$Tunnel,
+        [psobject]$Agent = $null,
+        $LastHealAt,
+        [datetime]$Now = [datetime]::UtcNow,
+        [bool]$MutationSuppressed = $false
+    )
+
+    if ($MutationSuppressed) { return $false }
+    $componentUnavailable = $false
+    if ($null -ne $Tunnel.Components) {
+        $componentUnavailable = @($Tunnel.Components.PSObject.Properties.Value | Where-Object { $_.Status -in @('Stopped', 'Stale') }).Count -gt 0
+    }
+    $agentUnavailable = $null -ne $Agent -and [string]$Agent.Status -in @('Stopped', 'Stale')
+    $probeDriven = [bool]$Tunnel.RecoveryRequired -and [string]$Tunnel.Reason -eq 'relay_probe_failed' -and -not $componentUnavailable
+    if (-not $probeDriven -and -not $componentUnavailable -and -not $agentUnavailable) { return $false }
+    if ($null -eq $LastHealAt -or [string]::IsNullOrWhiteSpace([string]$LastHealAt)) { return $true }
+
+    $healAt = [datetime]::MinValue
+    $healAtText = ConvertTo-RelayMachineUtcText -Value $LastHealAt
+    # A corrupt optional telemetry timestamp must not permanently disable repair.
+    if (-not [datetime]::TryParse([string]$healAtText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$healAt)) { return $true }
+    $healAt = $healAt.ToUniversalTime()
+    if ($Now.ToUniversalTime() -lt $healAt.AddSeconds(100)) { return $false }
+    # Component/agent loss is independently observable. Only a probe-driven heal
+    # needs a post-heal relay sample to avoid recycling the same failed sample.
+    if (-not $probeDriven) { return $true }
+    $observedAt = [datetime]::MinValue
+    $observedAtText = ConvertTo-RelayMachineUtcText -Value $Tunnel.RelayStatusObservedAt
+    if ([string]::IsNullOrWhiteSpace([string]$observedAtText) -or -not [datetime]::TryParse([string]$observedAtText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$observedAt)) { return $false }
+    return $observedAt.ToUniversalTime() -ge $healAt.AddSeconds(90)
+}
+
+function Get-RelaySupervisorHealthSnapshot {
+    param(
+        [Parameter(Mandatory)][scriptblock]$TunnelStatusProvider,
+        [Parameter(Mandatory)][scriptblock]$AgentStatusProvider
+    )
+    $tunnel = $null
+    $agent = $null
+    try { $tunnel = & $TunnelStatusProvider } catch { return [PSCustomObject]@{ Valid = $false; Tunnel = $null; Agent = $null; Error = "tunnel_status: $([string]$_.Exception.Message)" } }
+    try { $agent = & $AgentStatusProvider } catch { return [PSCustomObject]@{ Valid = $false; Tunnel = $null; Agent = $null; Error = "agent_status: $([string]$_.Exception.Message)" } }
+    return [PSCustomObject]@{ Valid = $true; Tunnel = $tunnel; Agent = $agent; Error = $null }
+}
+
+function Get-RelaySupervisorRecoveryDecision {
+    param(
+        [Parameter(Mandatory)][psobject]$Tunnel,
+        [Parameter(Mandatory)][psobject]$Agent,
+        $LastHealAt,
+        [datetime]$Now = [datetime]::UtcNow,
+        [bool]$MutationSuppressed = $false
+    )
+    $eligible = Test-RelaySupervisorHealEligibility -Tunnel $Tunnel -Agent $Agent -LastHealAt $LastHealAt -Now $Now -MutationSuppressed $MutationSuppressed
+    $componentUnavailable = $null -ne $Tunnel.Components -and @($Tunnel.Components.PSObject.Properties.Value | Where-Object { $_.Status -in @('Stopped', 'Stale') }).Count -gt 0
+    return [PSCustomObject]@{
+        Eligible = $eligible
+        RestartTunnel = $eligible -and ([bool]$Tunnel.RecoveryRequired -or $componentUnavailable)
+        StartAgent = $eligible -and [string]$Agent.Status -in @('Stopped', 'Stale')
     }
 }
 
@@ -858,6 +1073,8 @@ function ConvertTo-RelayAggregateResult {
         }
         Tunnel = [PSCustomObject]@{
             Status = [string]$Tunnel.Status
+            Reason = [string]$Tunnel.Reason
+            RecoveryRequired = [bool]$Tunnel.RecoveryRequired
             SSHPID = $Tunnel.SSHPID
             FRPCPID = $Tunnel.FRPCPID
         }
@@ -945,6 +1162,7 @@ function Invoke-RelayOrchestratedStart {
         [Parameter(Mandatory)][psobject]$MachineConfig,
         [hashtable]$Providers,
         [int]$LifecycleTimeoutMs = 20000,
+        [ValidateRange(10000, 180000)][int]$TunnelConvergenceTimeoutMs = 90000,
         [int]$PollMs = 200
     )
 
@@ -972,7 +1190,7 @@ function Invoke-RelayOrchestratedStart {
         return $aggregate
     }
 
-    return Use-RelayMutex -Config $Config -TimeoutMs $LifecycleTimeoutMs -ScriptBlock {
+    $mutexOutcome = Use-RelayMutex -Config $Config -TimeoutMs $LifecycleTimeoutMs -ScriptBlock {
         # Backend: idempotent ensure. A healthy managed backend is a no-op.
         try {
             $null = Start-RelayBackend -Config $Config -StartBackendProvider $Providers.StartBackendProvider -ListenerProvider $Providers.ListenerProvider -ProcessProvider $Providers.ProcessProvider -ProbeProvider $Providers.ProbeProvider -ReadyTimeoutMs $LifecycleTimeoutMs -PollMs $PollMs -AllowStaleRecovery
@@ -989,6 +1207,7 @@ function Invoke-RelayOrchestratedStart {
         }
 
         # Tunnel and agent: converge only missing or unhealthy owned components.
+        Set-RelayTunnelMutationSuppression -MachineConfig $MachineConfig -DurationMs $TunnelConvergenceTimeoutMs -NowProvider $Providers.NowProvider
         try { $null = Start-RelayManagedTunnel -Config $Config -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -DaemonProvider $Providers.DaemonProvider -SleepProvider $Providers.SleepProvider }
         catch { $warnings.Add("Tunnel start failed: $([string]$_.Exception.Message)") }
         try { $null = Start-RelayMachineAgent -Config $Config -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -DaemonProvider $Providers.DaemonProvider -SleepProvider $Providers.SleepProvider }
@@ -996,12 +1215,15 @@ function Invoke-RelayOrchestratedStart {
         try { $null = Start-RelaySupervisor -Config $Config -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -DaemonProvider $Providers.DaemonProvider -SleepProvider $Providers.SleepProvider }
         catch { $warnings.Add("Tunnel supervisor start failed: $([string]$_.Exception.Message)") }
 
-        $backendFinal = Get-RelayStatus -Config $Config -ListenerProvider $Providers.ListenerProvider -ProcessProvider $Providers.ProcessProvider -ProbeProvider $Providers.ProbeProvider
-        $tunnelFinal = Get-RelayManagedTunnelStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
-        $agentFinal = Get-RelayMachineAgentStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
-        $supervisorFinal = Get-RelaySupervisorStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
-        return ConvertTo-RelayAggregateResult -BackendStatus $backendFinal -Tunnel $tunnelFinal -Agent $agentFinal -Authorization (ConvertTo-RelayMachineAuthorizationView -AuthResult $auth) -Supervisor $supervisorFinal -ExtraWarnings $warnings -Mutation -Action start
+        return $true
     }
+    if ($null -ne $mutexOutcome -and $null -ne $mutexOutcome.PSObject.Properties['Result']) { return $mutexOutcome }
+    $tunnelFinal = Wait-RelayTunnelConverged -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -SleepProvider $Providers.SleepProvider -NowProvider $Providers.NowProvider -TimeoutMs $TunnelConvergenceTimeoutMs
+    if ($tunnelFinal.Reason -eq 'relay_probe_convergence_timeout') { $warnings.Add('Relay tunnel probe convergence deadline expired.') }
+    $backendFinal = Get-RelayStatus -Config $Config -ListenerProvider $Providers.ListenerProvider -ProcessProvider $Providers.ProcessProvider -ProbeProvider $Providers.ProbeProvider
+    $agentFinal = Get-RelayMachineAgentStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
+    $supervisorFinal = Get-RelaySupervisorStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
+    return ConvertTo-RelayAggregateResult -BackendStatus $backendFinal -Tunnel $tunnelFinal -Agent $agentFinal -Authorization (ConvertTo-RelayMachineAuthorizationView -AuthResult $auth) -Supervisor $supervisorFinal -ExtraWarnings $warnings -Mutation -Action start
 }
 
 function Get-RelaySafeLifecycleErrorText {
@@ -1017,6 +1239,7 @@ function Invoke-RelayOrchestratedRestart {
         [Parameter(Mandatory)][psobject]$MachineConfig,
         [hashtable]$Providers,
         [int]$LifecycleTimeoutMs = 20000,
+        [ValidateRange(10000, 180000)][int]$TunnelConvergenceTimeoutMs = 90000,
         [int]$PollMs = 200
     )
 
@@ -1038,8 +1261,8 @@ function Invoke-RelayOrchestratedRestart {
         return $aggregate
     }
 
-    return Use-RelayMutex -Config $Config -TimeoutMs $LifecycleTimeoutMs -ScriptBlock {
-        $restartStartedUtc = [datetime]::UtcNow
+    $restartStartedUtc = if ($null -ne $Providers.NowProvider) { (& $Providers.NowProvider).ToUniversalTime() } else { [datetime]::UtcNow }
+    $mutexOutcome = Use-RelayMutex -Config $Config -TimeoutMs $LifecycleTimeoutMs -ScriptBlock {
 
         # Supervisor first: stop the resident watchdog so it cannot resurrect the
         # tunnel we are about to intentionally replace.
@@ -1070,6 +1293,7 @@ function Invoke-RelayOrchestratedRestart {
         }
 
         # Tunnel and agent: intentional runtime replacement, preserving target/port.
+        Set-RelayTunnelMutationSuppression -MachineConfig $MachineConfig -DurationMs $TunnelConvergenceTimeoutMs -NowProvider $Providers.NowProvider
         $tunnelStop = Stop-RelayManagedTunnel -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -SleepProvider $Providers.SleepProvider
         foreach ($warning in @($tunnelStop.Warnings)) { $warnings.Add([string]$warning) }
         try { $null = Start-RelayManagedTunnel -Config $Config -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -DaemonProvider $Providers.DaemonProvider -SleepProvider $Providers.SleepProvider }
@@ -1077,45 +1301,24 @@ function Invoke-RelayOrchestratedRestart {
 
         $agentStop = Stop-RelayMachineAgent -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -SleepProvider $Providers.SleepProvider
         foreach ($warning in @($agentStop.Warnings)) { $warnings.Add([string]$warning) }
-        $agentStarted = $false
         try {
             $null = Start-RelayMachineAgent -Config $Config -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -DaemonProvider $Providers.DaemonProvider -SleepProvider $Providers.SleepProvider
-            $agentStarted = $true
         }
         catch { $warnings.Add("Heartbeat agent start failed: $([string]$_.Exception.Message)") }
-
-        # Spec 5.2.8: wait for one accepted running heartbeat before declaring Ready.
-        if ($agentStarted) {
-            $heartbeatDeadline = [datetime]::UtcNow.AddMilliseconds([Math]::Max($LifecycleTimeoutMs, 15000))
-            $accepted = $false
-            do {
-                $agentView = Get-RelayMachineAgentStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
-                $heartbeat = $agentView.Heartbeat
-                if ($null -ne $heartbeat -and [string]$heartbeat.status -eq 'Ready' -and $null -ne $heartbeat.PSObject.Properties['updatedAt']) {
-                    # The [ref] target must be strongly typed or the 4-argument
-                    # TryParse overload fails to bind.
-                    $updated = [datetime]::MinValue
-                    $updatedText = ConvertTo-RelayMachineUtcText -Value $heartbeat.updatedAt
-                    if ([datetime]::TryParse($updatedText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$updated) -and $updated.ToUniversalTime() -ge $restartStartedUtc.AddSeconds(-1)) {
-                        $accepted = $true
-                        break
-                    }
-                }
-                Get-RelayOrchestrationSleep -SleepProvider $Providers.SleepProvider -Milliseconds 500
-            } while ([datetime]::UtcNow -lt $heartbeatDeadline)
-            if (-not $accepted) { $warnings.Add('No accepted running heartbeat was observed after restart.') }
-        }
 
         # Supervisor last: bring the resident watchdog back up for the new tunnel.
         try { $null = Start-RelaySupervisor -Config $Config -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -DaemonProvider $Providers.DaemonProvider -SleepProvider $Providers.SleepProvider }
         catch { $warnings.Add("Tunnel supervisor start failed: $([string]$_.Exception.Message)") }
 
-        $backendFinal = Get-RelayStatus -Config $Config -ListenerProvider $Providers.ListenerProvider -ProcessProvider $Providers.ProcessProvider -ProbeProvider $Providers.ProbeProvider
-        $tunnelFinal = Get-RelayManagedTunnelStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
-        $agentFinal = Get-RelayMachineAgentStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
-        $supervisorFinal = Get-RelaySupervisorStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
-        return ConvertTo-RelayAggregateResult -BackendStatus $backendFinal -Tunnel $tunnelFinal -Agent $agentFinal -Authorization (ConvertTo-RelayMachineAuthorizationView -AuthResult $auth) -Supervisor $supervisorFinal -ExtraWarnings $warnings -Mutation -Action restart
+        return $true
     }
+    if ($null -ne $mutexOutcome -and $null -ne $mutexOutcome.PSObject.Properties['Result']) { return $mutexOutcome }
+    $tunnelFinal = Wait-RelayTunnelConverged -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -SleepProvider $Providers.SleepProvider -NowProvider $Providers.NowProvider -TimeoutMs $TunnelConvergenceTimeoutMs -ObservedNotBefore $restartStartedUtc
+    if ($tunnelFinal.Reason -eq 'relay_probe_convergence_timeout') { $warnings.Add('Relay tunnel probe convergence deadline expired.') }
+    $backendFinal = Get-RelayStatus -Config $Config -ListenerProvider $Providers.ListenerProvider -ProcessProvider $Providers.ProcessProvider -ProbeProvider $Providers.ProbeProvider
+    $agentFinal = Get-RelayMachineAgentStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
+    $supervisorFinal = Get-RelaySupervisorStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
+    return ConvertTo-RelayAggregateResult -BackendStatus $backendFinal -Tunnel $tunnelFinal -Agent $agentFinal -Authorization (ConvertTo-RelayMachineAuthorizationView -AuthResult $auth) -Supervisor $supervisorFinal -ExtraWarnings $warnings -Mutation -Action restart
 }
 
 function Invoke-RelayOrchestratedStop {
@@ -1201,7 +1404,7 @@ function ConvertTo-RelayTunnelTargetResult {
     if ($Authorization.Status -eq 'Revoked') { $exitCode = 6 }
     $result = [PSCustomObject]@{
         Status = $status
-        Tunnel = [PSCustomObject]@{ Status = [string]$Tunnel.Status; SSHPID = $Tunnel.SSHPID; FRPCPID = $Tunnel.FRPCPID }
+        Tunnel = [PSCustomObject]@{ Status = [string]$Tunnel.Status; Reason = [string]$Tunnel.Reason; RecoveryRequired = [bool]$Tunnel.RecoveryRequired; SSHPID = $Tunnel.SSHPID; FRPCPID = $Tunnel.FRPCPID }
         HeartbeatAgent = [PSCustomObject]@{ Status = [string]$Agent.Status; PID = $Agent.PID; LastAcceptedAt = $Agent.LastAcceptedAt }
         Supervisor = if ($null -ne $Supervisor) { [PSCustomObject]@{ Status = [string]$Supervisor.Status; PID = $Supervisor.PID; LastHealAt = $Supervisor.LastHealAt } } else { $null }
         MachineAuthorization = [PSCustomObject]@{ Status = [string]$Authorization.Status; MachineID = $Authorization.MachineID; TargetID = $Authorization.TargetID }
@@ -1216,10 +1419,12 @@ function Invoke-RelayTunnelTarget {
         [Parameter(Mandatory)][psobject]$MachineConfig,
         [Parameter(Mandatory)][ValidateSet('start', 'status', 'restart', 'stop', 'doctor')][string]$Action,
         [hashtable]$Providers,
-        [int]$LifecycleTimeoutMs = 20000
+        [int]$LifecycleTimeoutMs = 20000,
+        [ValidateRange(10000, 180000)][int]$TunnelConvergenceTimeoutMs = 90000
     )
 
     $warnings = [Collections.Generic.List[string]]::new()
+    $mutationStartedUtc = if ($null -ne $Providers.NowProvider) { (& $Providers.NowProvider).ToUniversalTime() } else { [datetime]::UtcNow }
     $normalizedAction = if ($Action -eq 'doctor') { 'status' } else { $Action }
     $authView = $null
 
@@ -1232,6 +1437,7 @@ function Invoke-RelayTunnelTarget {
                 # Serialize component mutations under the shared mutex so this
                 # secondary surface can never race the resident supervisor's heal.
                 $null = Use-RelayMutex -Config $Config -TimeoutMs $LifecycleTimeoutMs -ScriptBlock {
+                    Set-RelayTunnelMutationSuppression -MachineConfig $MachineConfig -DurationMs $TunnelConvergenceTimeoutMs -NowProvider $Providers.NowProvider
                     try { $null = Start-RelayManagedTunnel -Config $Config -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -DaemonProvider $Providers.DaemonProvider -SleepProvider $Providers.SleepProvider }
                     catch { $warnings.Add("Tunnel start failed: $([string]$_.Exception.Message)") }
                     try { $null = Start-RelayMachineAgent -Config $Config -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -DaemonProvider $Providers.DaemonProvider -SleepProvider $Providers.SleepProvider }
@@ -1249,6 +1455,7 @@ function Invoke-RelayTunnelTarget {
                 # Serialize component mutations under the shared mutex so this
                 # secondary surface can never race the resident supervisor's heal.
                 $null = Use-RelayMutex -Config $Config -TimeoutMs $LifecycleTimeoutMs -ScriptBlock {
+                    Set-RelayTunnelMutationSuppression -MachineConfig $MachineConfig -DurationMs $TunnelConvergenceTimeoutMs -NowProvider $Providers.NowProvider
                     $supervisorStop = Stop-RelaySupervisor -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -SleepProvider $Providers.SleepProvider
                     foreach ($warning in @($supervisorStop.Warnings)) { $warnings.Add([string]$warning) }
                     $tunnelStop = Stop-RelayManagedTunnel -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -SleepProvider $Providers.SleepProvider
@@ -1283,11 +1490,16 @@ function Invoke-RelayTunnelTarget {
         }
     }
 
-    $tunnel = Get-RelayManagedTunnelStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
+    $tunnel = if ($normalizedAction -in @('start', 'restart') -and $authView.Status -eq 'Authorized') {
+        $notBefore = if ($normalizedAction -eq 'restart') { $mutationStartedUtc } else { [datetime]::MinValue }
+        Wait-RelayTunnelConverged -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider -SleepProvider $Providers.SleepProvider -NowProvider $Providers.NowProvider -TimeoutMs $TunnelConvergenceTimeoutMs -ObservedNotBefore $notBefore
+    }
+    else { Get-RelayManagedTunnelStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider }
+    if ($tunnel.Reason -eq 'relay_probe_convergence_timeout') { $warnings.Add('Relay tunnel probe convergence deadline expired.') }
     $agent = Get-RelayMachineAgentStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
     $supervisor = Get-RelaySupervisorStatus -MachineConfig $MachineConfig -ProcessProvider $Providers.ProcessProvider
     $mutation = $normalizedAction -in @('start', 'restart', 'stop')
     return ConvertTo-RelayTunnelTargetResult -Tunnel $tunnel -Agent $agent -Authorization $authView -Supervisor $supervisor -ExtraWarnings $warnings -Mutation:$mutation -Action $normalizedAction
 }
 
-Export-ModuleMember -Function Get-RelayMachineConfig, Read-RelayMachineCredentialSummary, Invoke-RelayMachineAuth, ConvertTo-RelayMachineAuthorizationView, Read-RelayMachineProcessState, Test-RelayMachineProcessIdentity, Get-RelayMachineAgentStatus, Start-RelayMachineAgent, Stop-RelayMachineAgent, Get-RelaySupervisorStatus, Start-RelaySupervisor, Stop-RelaySupervisor, Get-RelayManagedTunnelStatus, Start-RelayManagedTunnel, Stop-RelayManagedTunnel, Write-RelayMachineStateFile, Invoke-RelayOrchestratedStatus, Invoke-RelayOrchestratedDoctor, Invoke-RelayOrchestratedStart, Invoke-RelayOrchestratedRestart, Invoke-RelayOrchestratedStop, Invoke-RelayTunnelTarget, ConvertTo-RelayAggregateResult, Get-RelayOfflineAuthorizationView
+Export-ModuleMember -Function Get-RelayMachineConfig, Read-RelayMachineCredentialSummary, Invoke-RelayMachineAuth, ConvertTo-RelayMachineAuthorizationView, Read-RelayMachineProcessState, Test-RelayMachineProcessIdentity, Get-RelayMachineAgentStatus, Start-RelayMachineAgent, Stop-RelayMachineAgent, Get-RelaySupervisorStatus, Start-RelaySupervisor, Stop-RelaySupervisor, Get-RelayManagedTunnelStatus, Set-RelayTunnelMutationSuppression, Clear-RelayTunnelMutationSuppression, Test-RelayTunnelMutationSuppressed, Wait-RelayTunnelConverged, Test-RelaySupervisorHealEligibility, Get-RelaySupervisorHealthSnapshot, Get-RelaySupervisorRecoveryDecision, Start-RelayManagedTunnel, Stop-RelayManagedTunnel, Write-RelayMachineStateFile, Invoke-RelayOrchestratedStatus, Invoke-RelayOrchestratedDoctor, Invoke-RelayOrchestratedStart, Invoke-RelayOrchestratedRestart, Invoke-RelayOrchestratedStop, Invoke-RelayTunnelTarget, ConvertTo-RelayAggregateResult, ConvertTo-RelayTunnelTargetResult, Get-RelayOfflineAuthorizationView

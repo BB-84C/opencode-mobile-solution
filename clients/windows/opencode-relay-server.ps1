@@ -21,6 +21,9 @@ param(
     [ValidateRange(1, 60000)]
     [int]$LifecycleTimeoutMs = 20000,
     [Parameter(DontShow)]
+    [ValidateRange(10000, 180000)]
+    [int]$TunnelConvergenceTimeoutMs = 90000,
+    [Parameter(DontShow)]
     [ValidateRange(1, 10000)]
     [int]$LifecyclePollMs = 200
 )
@@ -165,15 +168,15 @@ try {
         if (-not $PSBoundParameters.ContainsKey('LifecycleTimeoutMs')) { $LifecycleTimeoutMs = 45000 }
         $machineConfig = if ($null -ne $MachineConfigOverride) { $MachineConfigOverride } else { Get-RelayMachineConfig -Config $config }
         if ($Target -eq 'tunnel') {
-            $outcome = Invoke-RelayTunnelTarget -Config $config -MachineConfig $machineConfig -Action $Action -Providers $Providers -LifecycleTimeoutMs $LifecycleTimeoutMs
+            $outcome = Invoke-RelayTunnelTarget -Config $config -MachineConfig $machineConfig -Action $Action -Providers $Providers -LifecycleTimeoutMs $LifecycleTimeoutMs -TunnelConvergenceTimeoutMs $TunnelConvergenceTimeoutMs
             Write-RelayResult -Result $outcome.Result -ExitCode $outcome.ExitCode
         }
         else {
             $outcome = switch ($Action) {
                 'status' { Invoke-RelayOrchestratedStatus -Config $config -MachineConfig $machineConfig -Providers $Providers }
                 'doctor' { Invoke-RelayOrchestratedDoctor -Config $config -MachineConfig $machineConfig -Providers $Providers -UserEnvironment $UserEnvironment }
-                'start' { Invoke-RelayOrchestratedStart -Config $config -MachineConfig $machineConfig -Providers $Providers -LifecycleTimeoutMs $LifecycleTimeoutMs -PollMs $LifecyclePollMs }
-                'restart' { Invoke-RelayOrchestratedRestart -Config $config -MachineConfig $machineConfig -Providers $Providers -LifecycleTimeoutMs $LifecycleTimeoutMs -PollMs $LifecyclePollMs }
+                'start' { Invoke-RelayOrchestratedStart -Config $config -MachineConfig $machineConfig -Providers $Providers -LifecycleTimeoutMs $LifecycleTimeoutMs -TunnelConvergenceTimeoutMs $TunnelConvergenceTimeoutMs -PollMs $LifecyclePollMs }
+                'restart' { Invoke-RelayOrchestratedRestart -Config $config -MachineConfig $machineConfig -Providers $Providers -LifecycleTimeoutMs $LifecycleTimeoutMs -TunnelConvergenceTimeoutMs $TunnelConvergenceTimeoutMs -PollMs $LifecyclePollMs }
                 'stop' { Invoke-RelayOrchestratedStop -Config $config -MachineConfig $machineConfig -Providers $Providers -LifecycleTimeoutMs $LifecycleTimeoutMs -PollMs $LifecyclePollMs }
             }
             Write-RelayResult -Result $outcome.Result -ExitCode $outcome.ExitCode

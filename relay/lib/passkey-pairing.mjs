@@ -7,6 +7,7 @@ import {
 import QRCode from 'qrcode';
 
 import { PairingStore, PairingStoreError } from './pairing-store.mjs';
+import { projectRelayStatus } from './machine-status-monitor.mjs';
 
 const SESSION_COOKIE = 'oc_relay_session';
 const MAX_BODY_BYTES = 128 * 1_024;
@@ -981,7 +982,8 @@ export function createPasskeyPairing({
     const machine = requireMachine(req);
     const heartbeat = await readJson(req);
     const updated = store.updateMachineHeartbeat(machine.machineID, heartbeat);
-    sendJson(res, 200, { accepted: true, machine: updated });
+    const status = (await getMachineStatuses([updated]))[0];
+    sendJson(res, 200, { accepted: true, relayStatus: projectRelayStatus(status) });
   }
 
   async function machineMe(req, res) {

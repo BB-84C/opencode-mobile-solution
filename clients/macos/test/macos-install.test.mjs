@@ -36,7 +36,7 @@ printf 'real:%s|username=%s\\n' "$*" "\${OPENCODE_SERVER_USERNAME:-unset}"
 `;
   await fs.writeFile(wrapper, original, { mode: 0o755 });
   const frpc = path.join(home, 'frpc');
-  await fs.writeFile(frpc, '#!/bin/zsh\nexit 0\n', { mode: 0o755 });
+  await fs.writeFile(frpc, '#!/bin/zsh\nprintf "0.71.0\\n"\n', { mode: 0o755 });
   const environment = {
     ...process.env,
     HOME: home,
@@ -80,18 +80,31 @@ printf 'real:%s|username=%s\\n' "$*" "\${OPENCODE_SERVER_USERNAME:-unset}"
   assert.equal(passthrough.stdout.trim(), 'real:auth list|username=unset');
 
   const environmentBeforeUpdate = await fs.readFile(path.join(config, 'env'), 'utf8');
+  const frpcDirectory = path.join(home, '.local', 'lib', 'opencode-relay', 'bin');
+  const frpcLink = path.join(frpcDirectory, 'frpc');
+  const staleFrpc = path.join(frpcDirectory, 'frpc-0.69.1');
+  await fs.writeFile(staleFrpc, '#!/bin/zsh\nprintf "0.69.1\\n"\n', { mode: 0o755 });
+  await fs.rm(frpcLink);
+  await fs.symlink(path.basename(staleFrpc), frpcLink);
   const updated = await run('/bin/zsh', [
     installer,
     'update',
     '--node', process.execPath,
-    '--frpc', frpc,
   ], environment);
   assert.equal(updated.code, 0, updated.stderr);
   assert.equal(await fs.readFile(path.join(config, 'env'), 'utf8'), environmentBeforeUpdate);
+  assert.equal(await fs.realpath(frpcLink), path.join(frpcDirectory, 'frpc-0.71.0'));
 
   const diagnosed = await run('/bin/zsh', [installer, 'doctor'], environment);
   assert.equal(diagnosed.code, 0, diagnosed.stderr);
   assert.match(diagnosed.stdout, /installation: OK/);
+  assert.match(diagnosed.stdout, /FRPC linked artifact: .*version 0\.71\.0/);
+
+  await fs.writeFile(path.join(frpcDirectory, 'frpc-0.71.0'), '#!/bin/zsh\nprintf "0.69.1\\n"\n', { mode: 0o755 });
+  const staleDoctor = await run('/bin/zsh', [installer, 'doctor'], environment);
+  assert.equal(staleDoctor.code, 10);
+  assert.match(staleDoctor.stderr, /stale version: 0\.69\.1/);
+  await fs.writeFile(path.join(frpcDirectory, 'frpc-0.71.0'), '#!/bin/zsh\nprintf "0.71.0\\n"\n', { mode: 0o755 });
 
   const uninstalled = await run('/bin/zsh', [installer, 'uninstall'], environment);
   assert.equal(uninstalled.code, 0, uninstalled.stderr);

@@ -54,12 +54,24 @@ On first install the script:
 3. Generates a random local Basic-auth password in a mode-600 config file.
 4. Installs every controller and launcher file; it does not depend on an old
    installation overlay.
-5. Downloads FRP `v0.69.1` for the detected Darwin architecture and verifies
+5. Downloads FRP `v0.71.0` for the detected Darwin architecture and verifies
    the release archive against its pinned SHA-256 before installation.
 6. Writes private installation metadata used for recursion checks and restore.
 
 Use `--opencode PATH`, `--node PATH`, or `--frpc PATH` when discovery/download
 is not appropriate. An existing config and machine credential are preserved.
+
+The pinned checksums come from the official FRP `v0.71.0`
+[`frp_sha256_checksums.txt`](https://github.com/fatedier/frp/releases/download/v0.71.0/frp_sha256_checksums.txt):
+
+| Asset | SHA-256 |
+|-------|---------|
+| `frp_0.71.0_darwin_amd64.tar.gz` | `1b1b4e2f1836e21e8733f1dddaacd4ed9ae67d7dbee39046b9d7b7eda6253637` |
+| `frp_0.71.0_darwin_arm64.tar.gz` | `45be02b186860d375ed49a8941ae9569628a54bf14e67fc36b29c98c99dabcc6` |
+
+Repository status: the installer now targets `v0.71.0`, but this Windows-side
+change does not deploy or activate it on any Mac. Production Macs remain on
+their previously deployed `v0.69.1` until a separate authorized Mac deployment.
 
 Authorize the machine and start all components:
 
@@ -119,6 +131,11 @@ machine credential.
 ```
 
 Update replaces code atomically and preserves config, credentials, and state.
+It checks the pinned `frpc-0.71.0` artifact rather than trusting the stable
+`frpc` link. If the versioned artifact is absent, update downloads and verifies
+it; every update then relinks `frpc` to `frpc-0.71.0`. `doctor` resolves the
+link, executes that artifact's `--version`, reports the resolved path/version,
+and fails when either the link target or actual version is stale.
 Normal uninstall stops managed processes, restores the prior `opencode` entry,
 and keeps the credential for reinstall. `--purge` first calls the authenticated
 machine self-revocation endpoint; it deletes config/state only after the relay

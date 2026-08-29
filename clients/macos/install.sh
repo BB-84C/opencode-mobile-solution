@@ -3,7 +3,9 @@
 set -euo pipefail
 
 readonly SOURCE_DIRECTORY="${0:A:h}"
-readonly FRP_VERSION="0.69.1"
+readonly FRP_VERSION="0.71.0"
+# Pinned from the official release checksum manifest:
+# https://github.com/fatedier/frp/releases/download/v0.71.0/frp_sha256_checksums.txt
 readonly BIN_DIRECTORY="${OPENCODE_RELAY_BIN_DIR:-$HOME/.local/bin}"
 readonly LIB_DIRECTORY="${OPENCODE_RELAY_LIB_DIR:-$HOME/.local/lib/opencode-relay}"
 readonly CONFIG_DIRECTORY="${OPENCODE_RELAY_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode-relay}"
@@ -205,11 +207,11 @@ download_verified_frpc() {
   case "$architecture" in
     arm64)
       archive="frp_${FRP_VERSION}_darwin_arm64.tar.gz"
-      checksum="310012e2f1dcf3cdde2605d29b95340b686c94d1680a23711d58efeffc02f64e"
+      checksum="45be02b186860d375ed49a8941ae9569628a54bf14e67fc36b29c98c99dabcc6"
       ;;
     x86_64)
       archive="frp_${FRP_VERSION}_darwin_amd64.tar.gz"
-      checksum="2bc26d02100ef333f2712149ea5997dc530dc0eefac64f4be41cb0f49d032f40"
+      checksum="1b1b4e2f1836e21e8733f1dddaacd4ed9ae67d7dbee39046b9d7b7eda6253637"
       ;;
     *) fail "Unsupported macOS architecture for bundled frpc: $architecture" ;;
   esac
@@ -306,8 +308,17 @@ install_client() {
 
   if [[ -n "$frpc_source" ]]; then
     install_frpc_from "$frpc_source"
-  elif [[ ! -x "$FRPC_LINK" && "$download_frpc" == true ]]; then
-    download_verified_frpc
+  elif [[ ! -x "$FRPC_VERSIONED" ]]; then
+    if [[ "$download_frpc" == true ]]; then
+      download_verified_frpc
+    elif [[ "$action" == update ]]; then
+      fail "Pinned frpc $FRP_VERSION is missing; update cannot retain a stale link."
+    fi
+  fi
+  if [[ -x "$FRPC_VERSIONED" ]]; then
+    ln -sfn "${FRPC_VERSIONED:t}" "$FRPC_LINK"
+  elif [[ "$action" == update ]]; then
+    fail "Pinned frpc $FRP_VERSION is missing after update."
   fi
 
   write_installation_metadata "$backup"
@@ -318,7 +329,7 @@ install_client() {
 }
 
 doctor() {
-  local errors=0 real node backup
+  local errors=0 real node backup linked_frpc_version linked_target
   private_file "$INSTALLATION_FILE" || { print -u2 -- '[FAIL] installation.json is missing or not private'; return 10; }
   real=$(metadata_value realOpenCode || true)
   node=$(metadata_value node || true)
@@ -329,7 +340,24 @@ doctor() {
     && { print -u2 -- '[FAIL] wrapper recursion detected'; (( ++errors )); }
   [[ -x "$node" ]] || { print -u2 -- '[FAIL] configured Node executable is missing'; (( ++errors )); }
   private_file "$ENV_FILE" || { print -u2 -- '[FAIL] env credential file is missing or not private'; (( ++errors )); }
-  [[ -x "$FRPC_LINK" ]] || print -u2 -- '[WARN] frpc is not installed; tunnel start will fail'
+  if [[ ! -L "$FRPC_LINK" || ! -x "$FRPC_LINK" ]]; then
+    print -u2 -- '[FAIL] pinned frpc link is missing or not executable'
+    (( ++errors ))
+  else
+    linked_target="${FRPC_LINK:A}"
+    if [[ "$linked_target" != "${FRPC_VERSIONED:A}" ]]; then
+      print -u2 -- "[FAIL] FRPC link is stale: $linked_target"
+      (( ++errors ))
+    else
+      linked_frpc_version=$("$FRPC_LINK" --version 2>/dev/null | /usr/bin/head -n 1 | /usr/bin/tr -d '\r' || true)
+      if [[ "$linked_frpc_version" != "$FRP_VERSION" && "$linked_frpc_version" != "v$FRP_VERSION" ]]; then
+        print -u2 -- "[FAIL] linked frpc reports stale version: ${linked_frpc_version:-unreadable}"
+        (( ++errors ))
+      else
+        print -r -- "FRPC linked artifact: $linked_target (version $linked_frpc_version)"
+      fi
+    fi
+  fi
   [[ -z "$backup" || -e "$backup" ]] || { print -u2 -- '[FAIL] original wrapper backup is missing'; (( ++errors )); }
   for command in jq curl lsof nc ssh; do
     command -v "$command" >/dev/null 2>&1 || { print -u2 -- "[FAIL] required command is missing: $command"; (( ++errors )); }

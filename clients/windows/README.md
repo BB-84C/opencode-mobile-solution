@@ -28,6 +28,7 @@ add those in your own copy if you want them.
 | `opencode-serve-attach.ps1` | Serve/attach helper used by the controller. |
 | `opencode-frp-tunnel.ps1` | FRP tunnel (SSH local-forward + `frpc`); kept for machines that still use the legacy two-layer transport. The managed tunnel in `opencode-relay-machine.psm1` prefers direct frpc-to-frps when `OPENCODE_FRP_DIRECT_HOST` is set. |
 | `opencode-tunnel.ps1` | Alternative plain SSH reverse tunnel daemon. |
+| `install-frpc.ps1` | Versioned FRPC `adopt` / `stage` / `activate` / `rollback` / `status` workflow with pinned checksums, tunnel-only lifecycle control, running-process readback, and automatic rollback. |
 
 ## Prerequisites
 
@@ -65,7 +66,89 @@ opencode --relay_server rename "My workstation"
 relay's passkey dashboard in your browser, where you approve this machine. After
 approval it stores a revocable machine credential and brings up the tunnel and
 heartbeat agent. The credential stays valid until you revoke it from the
-dashboard.
+dashboard. Start and restart may wait up to 90 seconds for a fresh VPS-side
+relay probe before returning `Degraded`; this convergence timeout is independent
+of the shorter local lifecycle timeout.
+
+## Versioned FRPC installation
+
+The installer pins the official Windows amd64 FRP `v0.71.0` archive:
+
+- Asset: <https://github.com/fatedier/frp/releases/download/v0.71.0/frp_0.71.0_windows_amd64.zip>
+- SHA-256: `9e5062e3e5cf07e67144a3a4acf175ef6a2486f3605dd6cf288bae34ab39819f`
+- Provenance: the release's official
+  [`frp_sha256_checksums.txt`](https://github.com/fatedier/frp/releases/download/v0.71.0/frp_sha256_checksums.txt)
+
+The expected hash is a source-owned constant. A mismatch fails closed; the
+installer never learns or rewrites the expected value from a downloaded file.
+Run each phase explicitly from the repository or installed client directory:
+
+```powershell
+pwsh -NoProfile -File .\clients\windows\install-frpc.ps1 adopt -Json # existing root only
+pwsh -NoProfile -File .\clients\windows\install-frpc.ps1 stage
+pwsh -NoProfile -File .\clients\windows\install-frpc.ps1 status -Json
+pwsh -NoProfile -File .\clients\windows\install-frpc.ps1 activate -Json
+pwsh -NoProfile -File .\clients\windows\install-frpc.ps1 rollback -Json
+```
+
+`adopt` is the only path that can put a sentinel into a pre-existing production
+FRP root. It lists and inspects the root, requires User-scope
+`OPENCODE_FRPC_EXE` to name the only existing managed binary inside that root,
+executes its actual `--version`, and accepts only v0.69.1. Unmanaged
+executables, directories, reparse points, or other unrecognized content reject
+adoption and leave the sentinel absent. `stage` never silently adopts an
+existing directory.
+
+`stage` is non-disruptive. It downloads and extracts only below the managed FRP
+version-staging directory, then checks the archive SHA-256, actual `--version`,
+and `frpc verify -c` against the current `frpc.toml`. It does not invoke the
+controller or change User environment. The managed root, staging directories,
+and every replacement/deletion are protected by structural path checks and
+creation-time sentinels.
+
+Production activation has a fixed contract:
+
+1. Read the actual running FRPC PID, executable path, version, and hash; require
+   it to be `v0.69.1` and to match User-scope `OPENCODE_FRPC_EXE`.
+2. Invoke controller `stop tunnel`. This stops only supervisor, heartbeat agent,
+   and FRPC; it never invokes a backend lifecycle command or touches port 4096.
+3. Re-read and archive the old binary as `frpc-0.69.1.exe`, then verify the
+   archive's actual version and hash.
+4. Install the staged candidate as `frpc-0.71.0.exe`, verify it again, and set
+   User-scope `OPENCODE_FRPC_EXE` to that versioned path.
+5. Invoke controller `start tunnel`. Startup can consume the controller's full
+   90-second VPS-probe convergence window; a live PID alone is not success.
+6. Read the new running PID's executable path and actual version, then invoke a
+   separate controller `status tunnel`. Activation is gated on the real
+   tunnel-target payload: root `Status=Ready`, `Tunnel.Status=Running`, matching
+   `Tunnel.FRPCPID`, a running heartbeat agent, and authorized/preserved machine
+   authorization. Full-relay/backend aggregate state is not an activation gate.
+
+Any post-stop failure restores the verified old User value, restarts only the
+tunnel target, and reads back the running `v0.69.1` process plus independent
+controller tunnel-target status. A healthy already-selected v0.71.0 activation
+is idempotent and performs no stop or selection write. Recovery failures report
+the non-secret failed step, restore/archive paths, tunnel controller status, and
+the next rollback command.
+
+One persistent `.install-frpc.lock` file serializes mutations through an
+exclusive open handle. The file is intentionally retained after handle close:
+an unlocked old file cannot wedge later runs, concurrent holders cannot race,
+and there is no delete-after-dispose window.
+
+The production FRP binary root comes from the Windows LocalApplicationData
+known folder and has no dedicated environment override. The current FRPC
+configuration can still be moved deliberately with the User-scope
+`OPENCODE_RELAY_CONFIG_DIR`; test roots and injected providers require explicit
+`-TestMode`.
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | Adopted, staged, activated, or status read completed; inspect `State` in JSON. |
+| `20` | Verified rollback is running, including automatic safe rollback. |
+| `21` | Recovery was attempted but the running rollback could not be confirmed. |
+| `22` | Safety rejection: checksum/version/config/path/identity/lock contract failed. |
+| `64` | Unsupported action or incomplete test-only provider contract. |
 
 ## Configuration knobs (environment)
 
@@ -78,4 +161,16 @@ dashboard.
 | `OPENCODE_SERVER_PORT` | Local backend port (default `4096`). |
 | `OPENCODE_FRPC_EXE` | Path to `frpc.exe`. |
 | `OPENCODE_RELAY_SUPERVISOR_INTERVAL_MS` | Tunnel supervisor heal-check cadence in ms (default `30000`, floor `10000`). |
+| `OPENCODE_MACHINE_HEARTBEAT_MS` | Machine heartbeat cadence in ms (default `30000`, floor `10000`); tunnel relay-status freshness is at least 90 seconds or three heartbeat intervals. |
 | `OPENCODE_CONTROLLER_SCRIPT` / `OPENCODE_LOCAL_SCRIPT` / `OPENCODE_LAUNCH_SCRIPT` | Override script paths used by `opencode.cmd`. |
+
+## Hermetic health-contract tests
+
+These tests use fake process/status providers and dynamic ports. They do not
+touch the live backend, User environment, or relay service:
+
+```powershell
+node --test --test-concurrency=1 "clients/windows/test/*.test.mjs"
+pwsh -NoProfile -File ".\clients\windows\test\health-contract.Tests.ps1"
+pwsh -NoProfile -File ".\clients\windows\test\install-frpc.Tests.ps1"
+```

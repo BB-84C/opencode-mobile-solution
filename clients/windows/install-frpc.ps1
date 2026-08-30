@@ -6,7 +6,8 @@ param(
     [Parameter(DontShow)][switch]$TestMode,
     [Parameter(DontShow)][string]$TestRoot,
     [Parameter(DontShow)][string]$TestConfigPath,
-    [Parameter(DontShow)][hashtable]$Providers
+    [Parameter(DontShow)][hashtable]$Providers,
+    [Parameter(DontShow)][switch]$LibraryOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -144,6 +145,43 @@ function Invoke-CapturedProcess([string]$FilePath, [string[]]$Arguments) {
     return [PSCustomObject]@{ ExitCode = $process.ExitCode; Stdout = $stdout; Stderr = $stderr }
 }
 
+function ConvertTo-FrpcUtcInstant($Value, [switch]$AllowDmtf) {
+    if ($Value -is [datetimeoffset]) { return ([datetimeoffset]$Value).UtcDateTime }
+    if ($Value -is [datetime]) { return ([datetime]$Value).ToUniversalTime() }
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $null }
+
+    $parsed = [datetime]::MinValue
+    if ([datetime]::TryParse(
+        [string]$Value,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$parsed
+    )) {
+        return $parsed.ToUniversalTime()
+    }
+    if ($AllowDmtf) {
+        try { return ([Management.ManagementDateTimeConverter]::ToDateTime([string]$Value)).ToUniversalTime() }
+        catch { return $null }
+    }
+    return $null
+}
+
+function Get-RunningFrpcFromState([string]$StatePath, [scriptblock]$ProcessLookup) {
+    $state = Read-JsonFile $StatePath
+    if ($null -eq $state -or $null -eq $state.process) { return $null }
+    $processId = [int]$state.process.pid
+    $process = & $ProcessLookup $processId
+    if ($null -eq $process) { return $null }
+    $recordedPath = Get-FullPath ([string]$state.process.executable)
+    $actualPath = Get-FullPath ([string]$process.ExecutablePath)
+    if (-not $actualPath.Equals($recordedPath, [StringComparison]::OrdinalIgnoreCase)) { return $null }
+    $recordedCreatedUtc = ConvertTo-FrpcUtcInstant $state.process.createdUtc
+    $actualCreatedUtc = ConvertTo-FrpcUtcInstant $process.CreationDate -AllowDmtf
+    if ($null -eq $recordedCreatedUtc -or $null -eq $actualCreatedUtc) { return $null }
+    if ([Math]::Abs(($actualCreatedUtc - $recordedCreatedUtc).TotalSeconds) -gt 2) { return $null }
+    return [PSCustomObject]@{ PID = $processId; ExecutablePath = $actualPath }
+}
+
 function New-DefaultProviders([psobject]$Context) {
     return @{
         DownloadArchive = {
@@ -183,24 +221,10 @@ function New-DefaultProviders([psobject]$Context) {
         }
         GetRunningFrpc = {
             param($statePath)
-            $state = Read-JsonFile $statePath
-            if ($null -eq $state -or $null -eq $state.process) { return $null }
-            $processId = [int]$state.process.pid
-            $process = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue
-            if ($null -eq $process) { return $null }
-            $recordedPath = Get-FullPath ([string]$state.process.executable)
-            $actualPath = Get-FullPath ([string]$process.ExecutablePath)
-            if (-not $actualPath.Equals($recordedPath, [StringComparison]::OrdinalIgnoreCase)) { return $null }
-            $recordedCreated = [datetime]::MinValue
-            if (-not [datetime]::TryParse([string]$state.process.createdUtc, [ref]$recordedCreated)) { return $null }
-            $actualCreated = if ($process.CreationDate -is [datetime]) {
-                ([datetime]$process.CreationDate).ToUniversalTime()
+            return Get-RunningFrpcFromState -StatePath $statePath -ProcessLookup {
+                param($processId)
+                Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue
             }
-            else {
-                ([Management.ManagementDateTimeConverter]::ToDateTime([string]$process.CreationDate)).ToUniversalTime()
-            }
-            if ([Math]::Abs(($actualCreated - $recordedCreated.ToUniversalTime()).TotalSeconds) -gt 2) { return $null }
-            return [PSCustomObject]@{ PID = $processId; ExecutablePath = $actualPath }
         }
         AcquireLock = {
             param($path)
@@ -628,6 +652,8 @@ function Invoke-FrpcInstaller {
         }
     }
 }
+
+if ($TestMode -and $LibraryOnly) { return }
 
 $result = try {
     Invoke-FrpcInstaller

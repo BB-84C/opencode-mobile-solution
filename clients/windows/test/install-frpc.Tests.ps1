@@ -106,6 +106,24 @@ function Invoke-TestInstaller($Fixture, [string]$Action, [hashtable]$Providers) 
 try {
     Assert-True (Test-Path -LiteralPath $installer -PathType Leaf) 'installer script must exist'
 
+    . $installer -TestMode -LibraryOnly
+    $revivedFixture = New-Fixture 'revived-created-utc'
+    $revivedStatePath = Join-Path ([IO.Path]::GetDirectoryName($revivedFixture.Root)) 'tunnel-frpc-process.json'
+    $utcInstant = '2026-08-29T12:00:00.0000000Z'
+    [IO.File]::WriteAllText($revivedStatePath, ([ordered]@{
+        schema = 1
+        process = [ordered]@{ pid = 4242; createdUtc = $utcInstant; executable = $revivedFixture.Old }
+    } | ConvertTo-Json -Depth 4))
+    $revivedJson = [IO.File]::ReadAllText($revivedStatePath) | ConvertFrom-Json
+    Assert-True ($revivedJson.process.createdUtc -is [datetime]) 'ConvertFrom-Json must revive createdUtc as DateTime for the regression'
+    $sameInstantWithOffset = [datetimeoffset]'2026-08-29T08:00:00-04:00'
+    $revivedReadback = Get-RunningFrpcFromState -StatePath $revivedStatePath -ProcessLookup {
+        param($processId)
+        [PSCustomObject]@{ ProcessId = $processId; ExecutablePath = $revivedFixture.Old; CreationDate = $sameInstantWithOffset }
+    }
+    Assert-Equal $revivedReadback.PID 4242 'revived DateTime and local-offset CIM time identify the same process'
+    Assert-Equal $revivedReadback.ExecutablePath ([IO.Path]::GetFullPath($revivedFixture.Old)) 'revived DateTime readback preserves executable identity'
+
     $stageFixture = New-Fixture 'stage'
     $stageProviders = New-Providers $stageFixture
     $beforeUser = $global:FrpcTestUserValue

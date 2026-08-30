@@ -128,7 +128,7 @@ function targetRegistry(snapshot = configReloader.getSnapshot()) {
     return targets;
 }
 
-function probeTarget(target) {
+function probeTarget(target, { signal } = {}) {
     return new Promise((resolve) => {
         if (!target) {
             resolve({ reachable: false, statusCode: null });
@@ -139,6 +139,7 @@ function probeTarget(target) {
             port: target.port,
             path: '/global/health',
             method: 'GET',
+            signal,
             headers: {
                 Authorization: `Basic ${Buffer.from(`${target.basicUser}:${target.basicPass}`).toString('base64')}`,
             },

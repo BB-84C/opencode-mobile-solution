@@ -136,6 +136,24 @@ exclusive open handle. The file is intentionally retained after handle close:
 an unlocked old file cannot wedge later runs, concurrent holders cannot race,
 and there is no delete-after-dispose window.
 
+Every external process call is bounded. Version and config probes use
+file-backed stdout/stderr plus a bounded wrapper wait (10 and 15 seconds). The
+controller runs through an out-of-process-tree `Win32_Process.Create` wrapper;
+stdout/stderr go to a managed-root capture directory and an atomic completion
+sentinel records the controller exit code. The installer polls that sentinel
+instead of waiting for output EOF, so detached daemons may retain their file
+handles without hanging activation. Its explicit 150-second timeout covers the
+45-second lifecycle budget plus 90-second convergence budget. On timeout the
+result names the failed step and capture path; cleanup occurs only when wrapper
+PID, creation time, and `cmd.exe` identity match this call, and only that verified
+descendant tree is stopped. Foreign or ambiguous processes are left untouched.
+
+The archive download has a separate pinned 300-second network timeout through
+`Invoke-WebRequest -TimeoutSec`. This is intentionally distinct from the
+150-second controller/process budget: the former bounds HTTPS transfer, while
+the latter covers local lifecycle plus relay-probe convergence. A network stall
+therefore fails `stage` rather than waiting indefinitely.
+
 The production FRP binary root comes from the Windows LocalApplicationData
 known folder and has no dedicated environment override. The current FRPC
 configuration can still be moved deliberately with the User-scope

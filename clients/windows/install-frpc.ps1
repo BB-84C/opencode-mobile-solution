@@ -18,11 +18,13 @@ $script:ArchiveName = 'frp_0.71.0_windows_amd64.zip'
 $script:ArchiveSha256 = '9e5062e3e5cf07e67144a3a4acf175ef6a2486f3605dd6cf288bae34ab39819f'
 $script:ReleaseUrl = "https://github.com/fatedier/frp/releases/download/v$($script:FrpVersion)/$($script:ArchiveName)"
 $script:ChecksumUrl = "https://github.com/fatedier/frp/releases/download/v$($script:FrpVersion)/frp_sha256_checksums.txt"
+$script:DownloadTimeoutSec = 300
 $script:ExitActivated = 0
 $script:ExitRolledBack = 20
 $script:ExitRecoveryFailed = 21
 $script:ExitSafetyRejected = 22
 $script:ExitUsage = 64
+$script:ProcessTestMode = [bool]$TestMode
 
 function New-FrpcResult {
     param(
@@ -129,20 +131,155 @@ function Read-JsonFile([string]$Path) {
     catch { Throw-FrpcFailure SAFETY 'Managed metadata is unreadable.' }
 }
 
-function Invoke-CapturedProcess([string]$FilePath, [string[]]$Arguments) {
+function ConvertTo-BatchQuotedArgument([string]$Value) {
+    if ($null -eq $Value -or $Value -match '["\r\n]') { Throw-FrpcFailure SAFETY 'An external-process argument could not be represented safely.' }
+    return '"' + $Value.Replace('%', '%%') + '"'
+}
+
+function New-ProcessCapture([string]$CaptureRoot, [string]$FilePath, [string[]]$Arguments, [string]$Step) {
+    $root = Get-FullPath $CaptureRoot
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { [IO.Directory]::CreateDirectory($root) | Out-Null }
+    $capture = Join-Path $root ('.frpc-process-' + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($capture) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $capture '.frpc-process-capture-v1'), "step=$Step")
+    $stdout = Join-Path $capture 'stdout.log'
+    $stderr = Join-Path $capture 'stderr.log'
+    $sentinel = Join-Path $capture 'complete.exitcode'
+    $sentinelNew = "$sentinel.new"
+    $wrapper = Join-Path $capture 'invoke.cmd'
+    $command = @((ConvertTo-BatchQuotedArgument (Get-FullPath $FilePath))) + @($Arguments | ForEach-Object { ConvertTo-BatchQuotedArgument ([string]$_) })
+    $lines = @(
+        '@echo off',
+        (($command -join ' ') + ' 1>' + (ConvertTo-BatchQuotedArgument $stdout) + ' 2>' + (ConvertTo-BatchQuotedArgument $stderr)),
+        'set "frpc_exit=%ERRORLEVEL%"',
+        ('>' + (ConvertTo-BatchQuotedArgument $sentinelNew) + ' echo %frpc_exit%'),
+        ('move /y ' + (ConvertTo-BatchQuotedArgument $sentinelNew) + ' ' + (ConvertTo-BatchQuotedArgument $sentinel) + ' >nul'),
+        'exit /b %frpc_exit%'
+    )
+    [IO.File]::WriteAllLines($wrapper, $lines, [Text.Encoding]::ASCII)
+    return [PSCustomObject]@{ Root=$capture; Wrapper=$wrapper; Stdout=$stdout; Stderr=$stderr; Sentinel=$sentinel; Step=$Step }
+}
+
+function Read-SharedTextFile([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true)
+        try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
+function Remove-ProcessCapture([psobject]$Capture) {
+    if ($null -eq $Capture -or -not (Test-Path -LiteralPath $Capture.Root -PathType Container)) { return }
+    if (-not (Test-Path -LiteralPath (Join-Path $Capture.Root '.frpc-process-capture-v1') -PathType Leaf)) { return }
+    Remove-Item -LiteralPath $Capture.Root -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Get-InstallerProcessInfo([int]$ProcessId) {
+    return Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -OperationTimeoutSec 5 -ErrorAction SilentlyContinue
+}
+
+function Stop-VerifiedInstallerProcessTree([int]$RootProcessId, [string]$ExpectedExecutable, [datetime]$LaunchedAtUtc) {
+    $root = Get-InstallerProcessInfo $RootProcessId
+    if ($null -eq $root) { return $false }
+    $actualExecutable = Get-FullPath ([string]$root.ExecutablePath)
+    if (-not $actualExecutable.Equals((Get-FullPath $ExpectedExecutable), [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $rootCreated = ConvertTo-FrpcUtcInstant $root.CreationDate -AllowDmtf
+    if ($null -eq $rootCreated -or $rootCreated -lt $LaunchedAtUtc.AddSeconds(-2)) { return $false }
+
+    $all = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5 -ErrorAction SilentlyContinue)
+    $owned = [Collections.Generic.HashSet[int]]::new()
+    $depth = @{}
+    $null = $owned.Add($RootProcessId)
+    $depth[$RootProcessId] = 0
+    do {
+        $added = $false
+        foreach ($candidate in $all) {
+            $candidateId = [int]$candidate.ProcessId
+            if ($owned.Contains($candidateId) -or -not $owned.Contains([int]$candidate.ParentProcessId)) { continue }
+            $created = ConvertTo-FrpcUtcInstant $candidate.CreationDate -AllowDmtf
+            if ($null -ne $created -and $created -ge $LaunchedAtUtc.AddSeconds(-2)) {
+                $null = $owned.Add($candidateId)
+                $depth[$candidateId] = [int]$depth[[int]$candidate.ParentProcessId] + 1
+                $added = $true
+            }
+        }
+    } while ($added)
+    $ordered = @($owned | Sort-Object { -[int]$depth[[int]$_] })
+    foreach ($processId in $ordered) { Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue }
+    return $true
+}
+
+function Complete-ProcessCapture([psobject]$Capture, [int]$FallbackExitCode = 1) {
+    $exitCode = $FallbackExitCode
+    if (Test-Path -LiteralPath $Capture.Sentinel -PathType Leaf) {
+        $text = ([IO.File]::ReadAllText($Capture.Sentinel)).Trim()
+        $parsed = 0
+        if ([int]::TryParse($text, [ref]$parsed)) { $exitCode = $parsed }
+    }
+    return [PSCustomObject]@{
+        ExitCode=$exitCode; Stdout=(Read-SharedTextFile $Capture.Stdout); Stderr=(Read-SharedTextFile $Capture.Stderr)
+        TimedOut=$false; Step=$Capture.Step; CapturePath=$Capture.Root
+    }
+}
+
+function Invoke-CapturedProcess(
+    [string]$FilePath,
+    [string[]]$Arguments,
+    [string]$CaptureRoot,
+    [string]$Step = 'external-process',
+    [ValidateRange(100,180000)][int]$TimeoutMs = 15000
+) {
+    $capture = New-ProcessCapture -CaptureRoot $CaptureRoot -FilePath $FilePath -Arguments $Arguments -Step $Step
+    $cmd = (Get-Command cmd.exe -ErrorAction Stop).Source
+    $launchedAt = [datetime]::UtcNow
     $start = [Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = $FilePath
+    $start.FileName = $cmd
     $start.UseShellExecute = $false
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
-    foreach ($argument in $Arguments) { $null = $start.ArgumentList.Add($argument) }
+    foreach ($argument in @('/d','/c',$capture.Wrapper)) { $null = $start.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $start
-    if (-not $process.Start()) { return [PSCustomObject]@{ ExitCode = 1; Stdout = ''; Stderr = '' } }
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
-    return [PSCustomObject]@{ ExitCode = $process.ExitCode; Stdout = $stdout; Stderr = $stderr }
+    if (-not $process.Start()) { Remove-ProcessCapture $capture; return [PSCustomObject]@{ ExitCode=1; Stdout=''; Stderr=''; TimedOut=$false; Step=$Step } }
+    if (-not $process.WaitForExit($TimeoutMs)) {
+        $cleaned = Stop-VerifiedInstallerProcessTree -RootProcessId $process.Id -ExpectedExecutable $cmd -LaunchedAtUtc $launchedAt
+        Throw-FrpcFailure SAFETY "External process timed out at step '$Step'. VerifiedCleanup=$cleaned CapturePath=$($capture.Root)"
+    }
+    $result = Complete-ProcessCapture $capture $process.ExitCode
+    Remove-ProcessCapture $capture
+    return $result
+}
+
+function Invoke-ControllerCapturedProcess(
+    [string]$FilePath,
+    [string[]]$Arguments,
+    [string]$CaptureRoot,
+    [string]$Step,
+    [ValidateRange(100,180000)][int]$TimeoutMs = 150000,
+    [ValidateRange(20,2000)][int]$PollMs = 100
+) {
+    if (-not $script:ProcessTestMode -and $TimeoutMs -lt 135000) { Throw-FrpcFailure SAFETY 'Controller timeout must cover the 45-second lifecycle plus 90-second convergence budget.' }
+    $capture = New-ProcessCapture -CaptureRoot $CaptureRoot -FilePath $FilePath -Arguments $Arguments -Step $Step
+    $cmd = (Get-Command cmd.exe -ErrorAction Stop).Source
+    $commandLine = (ConvertTo-BatchQuotedArgument $cmd) + ' /d /c ' + (ConvertTo-BatchQuotedArgument $capture.Wrapper)
+    $launchedAt = [datetime]::UtcNow
+    $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine=$commandLine } -OperationTimeoutSec 10 -ErrorAction Stop
+    if ([int]$created.ReturnValue -ne 0 -or [int]$created.ProcessId -le 0) {
+        Remove-ProcessCapture $capture
+        return [PSCustomObject]@{ ExitCode=1; Stdout=''; Stderr=''; TimedOut=$false; Step=$Step }
+    }
+    $wrapperPid = [int]$created.ProcessId
+    $deadline = [datetime]::UtcNow.AddMilliseconds($TimeoutMs)
+    while ([datetime]::UtcNow -lt $deadline) {
+        if (Test-Path -LiteralPath $capture.Sentinel -PathType Leaf) {
+            $result = Complete-ProcessCapture $capture
+            Remove-ProcessCapture $capture
+            return $result
+        }
+        Start-Sleep -Milliseconds $PollMs
+    }
+    $cleaned = Stop-VerifiedInstallerProcessTree -RootProcessId $wrapperPid -ExpectedExecutable $cmd -LaunchedAtUtc $launchedAt
+    Throw-FrpcFailure SAFETY "Controller timed out at step '$Step'. VerifiedCleanup=$cleaned CapturePath=$($capture.Root)"
 }
 
 function ConvertTo-FrpcUtcInstant($Value, [switch]$AllowDmtf) {
@@ -186,13 +323,13 @@ function New-DefaultProviders([psobject]$Context) {
     return @{
         DownloadArchive = {
             param($url, $destination)
-            Invoke-WebRequest -Uri $url -OutFile $destination -MaximumRedirection 5 -ErrorAction Stop
+            Invoke-WebRequest -Uri $url -OutFile $destination -MaximumRedirection 5 -TimeoutSec $script:DownloadTimeoutSec -ErrorAction Stop
         }
         ExtractArchive = { param($archive, $destination) Expand-Archive -LiteralPath $archive -DestinationPath $destination -Force }
         GetHash = { param($path) (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
         GetVersion = {
             param($path)
-            $result = Invoke-CapturedProcess -FilePath $path -Arguments @('--version')
+            $result = Invoke-CapturedProcess -FilePath $path -Arguments @('--version') -CaptureRoot $Context.Root -Step 'frpc-version' -TimeoutMs 10000
             if ($result.ExitCode -ne 0) { return $null }
             $match = [regex]::Match($result.Stdout + "`n" + $result.Stderr, '(?m)(?:^|\s)v?(\d+\.\d+\.\d+)(?:\s|$)')
             if ($match.Success) { return $match.Groups[1].Value }
@@ -200,7 +337,7 @@ function New-DefaultProviders([psobject]$Context) {
         }
         VerifyConfig = {
             param($path, $config)
-            $result = Invoke-CapturedProcess -FilePath $path -Arguments @('verify', '-c', $config)
+            $result = Invoke-CapturedProcess -FilePath $path -Arguments @('verify', '-c', $config) -CaptureRoot $Context.Root -Step 'frpc-config-verify' -TimeoutMs 15000
             return $result.ExitCode -eq 0
         }
         GetUserEnvironment = { param($name) [Environment]::GetEnvironmentVariable($name, 'User') }
@@ -209,7 +346,7 @@ function New-DefaultProviders([psobject]$Context) {
         InvokeController = {
             param($controllerAction, $target)
             $arguments = @('-NoProfile', '-NoLogo', '-File', $Context.ControllerPath, '-Action', $controllerAction, '-Target', $target, '-Json')
-            $result = Invoke-CapturedProcess -FilePath (Get-Command pwsh -ErrorAction Stop).Source -Arguments $arguments
+            $result = Invoke-ControllerCapturedProcess -FilePath (Get-Command pwsh -ErrorAction Stop).Source -Arguments $arguments -CaptureRoot $Context.Root -Step "controller-$controllerAction-$target" -TimeoutMs 150000
             $payload = $null
             if (-not [string]::IsNullOrWhiteSpace($result.Stdout)) {
                 try {
@@ -223,7 +360,7 @@ function New-DefaultProviders([psobject]$Context) {
             param($statePath)
             return Get-RunningFrpcFromState -StatePath $statePath -ProcessLookup {
                 param($processId)
-                Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue
+                Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -OperationTimeoutSec 5 -ErrorAction SilentlyContinue
             }
         }
         AcquireLock = {

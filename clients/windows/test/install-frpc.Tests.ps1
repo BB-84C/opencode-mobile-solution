@@ -124,6 +124,96 @@ try {
     Assert-Equal $revivedReadback.PID 4242 'revived DateTime and local-offset CIM time identify the same process'
     Assert-Equal $revivedReadback.ExecutablePath ([IO.Path]::GetFullPath($revivedFixture.Old)) 'revived DateTime readback preserves executable identity'
 
+    $processFixture = New-Fixture 'inherited-output-handles'
+    $retainingChild = Join-Path ([IO.Path]::GetDirectoryName($processFixture.Root)) 'retaining-child.ps1'
+    $controllerLike = Join-Path ([IO.Path]::GetDirectoryName($processFixture.Root)) 'controller-like.ps1'
+    $retainingPidPath = Join-Path ([IO.Path]::GetDirectoryName($processFixture.Root)) 'retaining-child.pid'
+    [IO.File]::WriteAllText($retainingChild, 'Start-Sleep -Seconds 6')
+    [IO.File]::WriteAllText($controllerLike, @"
+`$child = Start-Process -FilePath '$((Get-Command pwsh).Source)' -ArgumentList @('-NoProfile','-File','$retainingChild') -NoNewWindow -PassThru
+[IO.File]::WriteAllText('$retainingPidPath', [string]`$child.Id)
+exit 0
+"@)
+    $captureClock = [Diagnostics.Stopwatch]::StartNew()
+    $captured = Invoke-ControllerCapturedProcess -FilePath (Get-Command pwsh).Source -Arguments @('-NoProfile','-File',$controllerLike) -CaptureRoot ([IO.Path]::GetDirectoryName($processFixture.Root)) -Step 'controller-retained-handles' -TimeoutMs 10000 -PollMs 50
+    $captureClock.Stop()
+    Assert-Equal $captured.ExitCode 0 'controller-like process exits successfully'
+    Assert-True ($captureClock.ElapsedMilliseconds -lt 3000) 'captured invocation must not wait for a descendant-retained output handle'
+    $retainingPid = [int][IO.File]::ReadAllText($retainingPidPath)
+    Assert-True ($null -ne (Get-Process -Id $retainingPid -ErrorAction SilentlyContinue)) 'controller return is independent of the still-running handle-retaining child'
+    Stop-Process -Id $retainingPid -Force
+    Start-Sleep -Milliseconds 200
+
+    $timeoutTarget = Join-Path ([IO.Path]::GetDirectoryName($processFixture.Root)) 'timeout-target.ps1'
+    $timeoutPidPath = Join-Path ([IO.Path]::GetDirectoryName($processFixture.Root)) 'timeout-target.pid'
+    [IO.File]::WriteAllText($timeoutTarget, "[IO.File]::WriteAllText('$timeoutPidPath', [string]`$PID); Start-Sleep -Seconds 30")
+    $adjacent = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru
+    try {
+        $timeoutMessage = $null
+        try {
+            $null = Invoke-ControllerCapturedProcess -FilePath (Get-Command pwsh).Source -Arguments @('-NoProfile','-File',$timeoutTarget) -CaptureRoot ([IO.Path]::GetDirectoryName($processFixture.Root)) -Step 'controller-timeout-probe' -TimeoutMs 500 -PollMs 50
+        }
+        catch { $timeoutMessage = [string]$_.Exception.Message }
+        Assert-True ($timeoutMessage -match "controller-timeout-probe") 'controller timeout reports the named step'
+        Assert-True ($timeoutMessage -match 'VerifiedCleanup=True') 'controller timeout reports verified cleanup'
+        Start-Sleep -Milliseconds 300
+        if (Test-Path -LiteralPath $timeoutPidPath -PathType Leaf) {
+            $timedOutPid = [int][IO.File]::ReadAllText($timeoutPidPath)
+            Assert-True ($null -eq (Get-Process -Id $timedOutPid -ErrorAction SilentlyContinue)) 'timeout cleanup removes the exact created target tree'
+        }
+        $adjacent.Refresh()
+        Assert-True (-not $adjacent.HasExited) 'timeout cleanup leaves an adjacent process alive'
+    }
+    finally {
+        if (-not $adjacent.HasExited) { Stop-Process -Id $adjacent.Id -Force }
+    }
+
+    $simpleTimeoutPidPath = Join-Path ([IO.Path]::GetDirectoryName($processFixture.Root)) 'simple-timeout.pid'
+    $simpleTimeoutTarget = Join-Path ([IO.Path]::GetDirectoryName($processFixture.Root)) 'simple-timeout.ps1'
+    [IO.File]::WriteAllText($simpleTimeoutTarget, "[IO.File]::WriteAllText('$simpleTimeoutPidPath', [string]`$PID); Start-Sleep -Seconds 30")
+    $simpleTimeoutMessage = $null
+    try {
+        $null = Invoke-CapturedProcess -FilePath (Get-Command pwsh).Source -Arguments @('-NoProfile','-File',$simpleTimeoutTarget) -CaptureRoot ([IO.Path]::GetDirectoryName($processFixture.Root)) -Step 'frpc-version-timeout-probe' -TimeoutMs 500
+    }
+    catch { $simpleTimeoutMessage = [string]$_.Exception.Message }
+    Assert-True ($simpleTimeoutMessage -match 'frpc-version-timeout-probe') 'simple probe timeout reports the named step'
+    Assert-True ($simpleTimeoutMessage -match 'VerifiedCleanup=True') 'simple probe timeout reports verified cleanup'
+    Start-Sleep -Milliseconds 300
+    if (Test-Path -LiteralPath $simpleTimeoutPidPath -PathType Leaf) {
+        $simpleTimedOutPid = [int][IO.File]::ReadAllText($simpleTimeoutPidPath)
+        Assert-True ($null -eq (Get-Process -Id $simpleTimedOutPid -ErrorAction SilentlyContinue)) 'simple probe timeout cleans its exact target tree'
+    }
+    $timeoutCapturePath = [regex]::Match($simpleTimeoutMessage, 'CapturePath=(.+)$').Groups[1].Value
+    Assert-True (Test-Path -LiteralPath $timeoutCapturePath -PathType Container) 'timeout retains its managed capture for diagnosis'
+
+    $successCaptureRoot = Join-Path ([IO.Path]::GetDirectoryName($processFixture.Root)) 'success-capture-root'
+    [IO.Directory]::CreateDirectory($successCaptureRoot) | Out-Null
+    $quickSuccess = Invoke-CapturedProcess -FilePath (Get-Command pwsh).Source -Arguments @('-NoProfile','-Command','exit 0') -CaptureRoot $successCaptureRoot -Step 'quick-success' -TimeoutMs 2000
+    Assert-Equal $quickSuccess.ExitCode 0 'bounded simple probe succeeds'
+    Assert-Equal @(Get-ChildItem -LiteralPath $successCaptureRoot -Directory -Filter '.frpc-process-*').Count 0 'successful capture is removed when no descendant retains it'
+
+    $script:ProcessTestMode = $false
+    try {
+        $floorMessage = $null
+        try {
+            $null = Invoke-ControllerCapturedProcess -FilePath (Get-Command pwsh).Source -Arguments @('-NoProfile','-Command','exit 0') -CaptureRoot $successCaptureRoot -Step 'production-floor' -TimeoutMs 134999
+        }
+        catch { $floorMessage = [string]$_.Exception.Message }
+        Assert-True ($floorMessage -match '45-second lifecycle plus 90-second convergence') 'production controller timeout enforces the 135-second floor'
+    }
+    finally { $script:ProcessTestMode = $true }
+
+    $mismatchAdjacent = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru
+    try {
+        $refused = Stop-VerifiedInstallerProcessTree -RootProcessId $mismatchAdjacent.Id -ExpectedExecutable (Join-Path ([IO.Path]::GetDirectoryName((Get-Command pwsh).Source)) 'not-pwsh.exe') -LaunchedAtUtc ([datetime]::UtcNow.AddSeconds(-1))
+        Assert-Equal $refused $false 'cleanup refuses a mismatched wrapper identity'
+        $mismatchAdjacent.Refresh()
+        Assert-True (-not $mismatchAdjacent.HasExited) 'cleanup refusal leaves the mismatched process alive'
+    }
+    finally {
+        if (-not $mismatchAdjacent.HasExited) { Stop-Process -Id $mismatchAdjacent.Id -Force }
+    }
+
     $stageFixture = New-Fixture 'stage'
     $stageProviders = New-Providers $stageFixture
     $beforeUser = $global:FrpcTestUserValue
@@ -320,6 +410,8 @@ try {
 
     $installerSource = [IO.File]::ReadAllText($installer)
     Assert-True ($installerSource -notmatch '\$env:LOCALAPPDATA|\$env:USERPROFILE') 'production roots use OS known-folder resolution rather than Process environment variables'
+    Assert-True ($installerSource -match '\$script:DownloadTimeoutSec\s*=\s*300') 'download timeout constant is pinned to 300 seconds'
+    Assert-True ($installerSource -match 'Invoke-WebRequest[^\r\n]+-TimeoutSec\s+\$script:DownloadTimeoutSec') 'production download provider uses the pinned timeout constant'
 
     'install-frpc.Tests.ps1: PASS'
 }

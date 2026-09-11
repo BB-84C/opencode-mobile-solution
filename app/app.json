@@ -10,7 +10,7 @@
     "ios": {
       "supportsTablet": true,
       "requireFullScreen": true,
-      "bundleIdentifier": "com.example.opencodemobile",
+      "bundleIdentifier": "com.skylerhu.opencodemobile",
       "config": {
         "usesNonExemptEncryption": false
       }

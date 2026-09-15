@@ -44,7 +44,6 @@ export function useDesktopShell(): void {
           'prompt-history-previous': () => state.previousPromptFromHistory(),
           'prompt-history-next': () => state.nextPromptFromHistory(),
           'prompt-stash-pop': () => state.popStashedPrompt(),
-          'new-session': () => state.startNewSessionPrompt(),
         };
 
         performDesktopAction({

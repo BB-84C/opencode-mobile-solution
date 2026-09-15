@@ -30,8 +30,7 @@ export type StoreActionId =
   | 'cycle-variant'
   | 'prompt-history-previous'
   | 'prompt-history-next'
-  | 'prompt-stash-pop'
-  | 'new-session';
+  | 'prompt-stash-pop';
 
 /** Store-backed actions, and whether they need an open session. */
 const STORE_ACTIONS: Record<StoreActionId, { needsSession: boolean }> = {
@@ -45,12 +44,10 @@ const STORE_ACTIONS: Record<StoreActionId, { needsSession: boolean }> = {
   'prompt-history-previous': { needsSession: false },
   'prompt-history-next': { needsSession: false },
   'prompt-stash-pop': { needsSession: false },
-  'new-session': { needsSession: false },
 };
 
 const NATIVE_TO_STORE: Record<string, StoreActionId> = {
   interrupt: 'interrupt',
-  'new-session': 'new-session',
   'cycle-agent': 'cycle-agent',
   'cycle-variant': 'cycle-variant',
 };

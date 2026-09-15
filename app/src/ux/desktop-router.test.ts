@@ -24,14 +24,17 @@ describe('desktop action routing', () => {
   });
 
   it('still allows the actions that do not need a session', () => {
-    expect(route('session_new', { hasSession: false })).toEqual({ kind: 'store', action: 'new-session' });
     expect(route('agent_cycle', { hasSession: false })).toEqual({ kind: 'store', action: 'cycle-agent' });
     expect(route('history_previous', { hasSession: false }))
       .toEqual({ kind: 'store', action: 'prompt-history-previous' });
   });
 
   it('hands an action to whichever screen registered for it', () => {
-    const context = { hasSession: true, screenHandles: new Set(['scroll-page-up', 'entrypoint:diffs']) };
+    const context = { hasSession: true, screenHandles: new Set(['scroll-page-up', 'entrypoint:diffs', 'new-session']) };
+
+    // Creating a session needs four choices collected by a screen, so the key
+    // opens that screen rather than reaching the store directly.
+    expect(route('session_new', context)).toEqual({ kind: 'screen', action: 'new-session' });
 
     expect(route('messages_page_up', context)).toEqual({ kind: 'screen', action: 'scroll-page-up' });
     expect(route('diff_open', context)).toEqual({ kind: 'screen', action: 'entrypoint:diffs' });
@@ -63,7 +66,7 @@ describe('desktop action routing', () => {
     const reached = new Set<string>();
 
     for (const action of [
-      'session_interrupt', 'session_new', 'agent_cycle', 'variant_cycle',
+      'session_interrupt', 'agent_cycle', 'variant_cycle',
       'session_compact', 'session_share', 'session_fork', 'messages_copy',
       'history_previous', 'history_next', 'prompt_stash_pop',
     ]) {

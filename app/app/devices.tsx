@@ -1,0 +1,127 @@
+import { router } from 'expo-router';
+import { useEffect, useMemo } from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+import { useOpenCodeMobileStore } from '@/src/store/mobile-store';
+import { palette } from '@/src/ui/palette';
+import {
+  buildDeviceSelectionModel,
+  isDeviceChoiceSelectable,
+  soleSelectableChoice,
+  type DeviceChoice,
+} from '@/src/ux/device-selection';
+
+export default function DevicesScreen() {
+  const store = useOpenCodeMobileStore();
+  const model = useMemo(
+    () => buildDeviceSelectionModel({
+      connections: store.connections,
+      relayTargets: store.relayTargets,
+    }),
+    [store.connections, store.relayTargets],
+  );
+
+  const open = (choice: DeviceChoice) => {
+    if (!isDeviceChoiceSelectable(choice)) return;
+    store.setActiveConnection(choice.hostId);
+    router.push({ pathname: '/two', params: { machine: choice.targetId } });
+  };
+
+  // With one machine there is no choice to present, and stopping to ask for it
+  // would be a screen the user has to dismiss every launch.
+  const sole = soleSelectableChoice(model);
+  useEffect(() => {
+    if (sole) open(sole);
+  }, [sole?.hostId, sole?.targetId]);
+
+  return (
+    <SafeAreaView style={styles.screen}>
+      <View style={styles.header}>
+        <Text style={styles.title}>Choose a machine</Text>
+        {model.totalChoices > 0 ? (
+          <Text style={styles.subtitle}>
+            {`${model.reachableChoices} of ${model.totalChoices} reachable`}
+          </Text>
+        ) : null}
+      </View>
+
+      <ScrollView contentContainerStyle={styles.list}>
+        {model.emptyReason && model.groups.length === 0 ? (
+          <View style={styles.empty}>
+            <Text style={styles.emptyText}>{model.emptyReason}</Text>
+            <Pressable style={styles.link} onPress={() => router.push('/')}>
+              <Text style={styles.linkText}>Pair a host</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
+        {model.groups.map((group) => (
+          <View key={group.hostId} style={styles.group}>
+            <View style={styles.groupHead}>
+              <Text style={styles.host}>{group.hostName}</Text>
+              <Text style={[styles.badge, group.hostReachable ? styles.badgeUp : styles.badgeDown]}>
+                {group.hostReachable ? 'online' : 'offline'}
+              </Text>
+            </View>
+
+            {group.sharesSessionsAcrossMachines ? (
+              <Text style={styles.note}>
+                These machines share one session database, so every session appears under each of
+                them. Choosing one picks which process runs your next prompt.
+              </Text>
+            ) : null}
+
+            {group.choices.map((choice) => {
+              const selectable = isDeviceChoiceSelectable(choice);
+              return (
+                <Pressable
+                  key={`${choice.hostId}:${choice.targetId || 'none'}`}
+                  accessibilityRole="button"
+                  accessibilityState={{ disabled: !selectable }}
+                  disabled={!selectable}
+                  onPress={() => open(choice)}
+                  style={[styles.choice, !selectable && styles.choiceBlocked]}>
+                  <View style={styles.choiceMain}>
+                    <Text style={styles.machine}>{choice.targetName}</Text>
+                    {choice.blockedReason ? (
+                      <Text style={styles.reason}>{choice.blockedReason}</Text>
+                    ) : null}
+                  </View>
+                  <Text style={selectable ? styles.openHint : styles.reason}>
+                    {selectable ? 'Open' : 'Unavailable'}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        ))}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  screen: { flex: 1, backgroundColor: palette.background },
+  header: { paddingHorizontal: 18, paddingTop: 18, paddingBottom: 10, gap: 4 },
+  title: { fontSize: 22, fontWeight: '800', color: palette.text },
+  subtitle: { fontSize: 13, color: palette.textMuted },
+  list: { padding: 14, gap: 14 },
+  group: { borderRadius: 14, borderWidth: 1, borderColor: palette.borderSubtle, backgroundColor: palette.backgroundPanel, padding: 12, gap: 10 },
+  groupHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  host: { fontSize: 15, fontWeight: '700', color: palette.text },
+  badge: { fontSize: 11, fontWeight: '700', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 9, overflow: 'hidden' },
+  badgeUp: { color: palette.background, backgroundColor: palette.success },
+  badgeDown: { color: palette.background, backgroundColor: palette.textMuted },
+  note: { fontSize: 12, lineHeight: 17, color: palette.textMuted },
+  choice: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingVertical: 11, paddingHorizontal: 12, borderRadius: 11, backgroundColor: palette.backgroundElement },
+  choiceBlocked: { opacity: 0.55 },
+  choiceMain: { flex: 1, gap: 2 },
+  machine: { fontSize: 14, fontWeight: '700', color: palette.text },
+  reason: { fontSize: 11, color: palette.textMuted },
+  openHint: { fontSize: 12, fontWeight: '800', color: palette.primary },
+  empty: { alignItems: 'center', gap: 10, paddingVertical: 30 },
+  emptyText: { fontSize: 13, color: palette.textMuted },
+  link: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 10, backgroundColor: palette.primary },
+  linkText: { fontSize: 13, fontWeight: '800', color: palette.foregroundOnAccent },
+});

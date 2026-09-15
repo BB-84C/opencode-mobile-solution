@@ -76,7 +76,8 @@ function RootLayoutNav() {
   return (
     <ThemeProvider value={opencodeNavigationTheme}>
       <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+          <Stack.Screen name="devices" options={{ headerShown: false }} />
         <Stack.Screen name="session/[sessionKey]" options={{ headerShown: false, gestureEnabled: false }} />
         <Stack.Screen name="pair" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={settingsModalOptions} />

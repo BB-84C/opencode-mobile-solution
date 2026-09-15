@@ -120,7 +120,10 @@ function createWindow() {
     return { action: "deny" };
   });
 
-  void window.loadURL(`${ORIGIN}/`);
+  // The desktop client opens on the machine picker rather than the host list:
+  // a laptop reaches several backends on one host, and which one runs the next
+  // prompt is a choice worth making before a session is on screen.
+  void window.loadURL(`${ORIGIN}/devices`);
 
   // A build that produces a bundle and a window that renders it are different
   // claims. With COCKPIT_SMOKE_OUT set the shell proves the second one: it

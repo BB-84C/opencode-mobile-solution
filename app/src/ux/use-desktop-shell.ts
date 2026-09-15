@@ -12,6 +12,7 @@ import { useEffect } from 'react';
 import { useOpenCodeMobileStore } from '../store/mobile-store';
 import { resolveDesktopAction } from './desktop-actions';
 import { createDesktopActionBridge, detectDesktopShellHost } from './desktop-bridge';
+import { installDesktopContextSink, setDesktopContext, type DesktopContext } from './desktop-context';
 import { performDesktopAction, type DesktopStoreActions } from './desktop-perform';
 import { routeDesktopAction } from './desktop-router';
 import { screenActionRegistry } from './desktop-screen-registry';
@@ -61,8 +62,22 @@ export function useDesktopShell(): void {
       },
     });
 
-    return () => bridge.dispose();
+    // Without this every key resolves as 'global', where no transcript, prompt or diff binding exists.
+    const uninstallContext = installDesktopContextSink((context) => bridge.setContext(context));
+
+    return () => {
+      uninstallContext();
+      bridge.dispose();
+    };
   }, []);
+}
+
+/** Declares which surface a screen is, for as long as it is mounted. */
+export function useDesktopContext(context: DesktopContext): void {
+  useEffect(() => {
+    setDesktopContext(context);
+    return () => setDesktopContext('global');
+  }, [context]);
 }
 
 /** Lets a screen claim the actions only it can perform, for as long as it is

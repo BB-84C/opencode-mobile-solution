@@ -29,6 +29,12 @@ import {
   reduceTranscriptFollow,
   type TranscriptFollowDecision,
 } from '@/src/ux/transcript-follow';
+import {
+  isTranscriptScrollNoop,
+  nextTranscriptOffset,
+  type TranscriptMetrics,
+  type TranscriptScrollCommand,
+} from '@/src/ux/transcript-scroll-commands';
 
 export type TranscriptVisibleRange = {
   firstIndex: number | null;
@@ -56,6 +62,8 @@ export type VirtualizedTranscriptProps<ItemT> = {
 
 export type VirtualizedTranscriptHandle = {
   scrollToLatest(): void;
+  /** Returns false when already at that end, so a key can say so. */
+  scroll(command: TranscriptScrollCommand): boolean;
 };
 
 /**
@@ -80,6 +88,8 @@ function VirtualizedTranscriptInner<ItemT>({
   onOlderEndReached,
 }: VirtualizedTranscriptProps<ItemT>, forwardedRef: ForwardedRef<VirtualizedTranscriptHandle>) {
   const listRef = useRef<FlatList<ItemT>>(null);
+  // Raw geometry for keyboard scrolling; the follow reducer answers a different question.
+  const metricsRef = useRef<TranscriptMetrics>({ offsetY: 0, viewportHeight: 0, contentHeight: 0 });
   const followStateRef = useRef(createTranscriptFollowState());
   const lastReportedBottomRef = useRef<boolean | null>(null);
   const dataLengthRef = useRef(data.length);
@@ -137,6 +147,20 @@ function VirtualizedTranscriptInner<ItemT>({
   }, [commitFollowDecision]);
 
   useImperativeHandle(forwardedRef, () => ({
+    scroll(command: TranscriptScrollCommand) {
+      if (isTranscriptScrollNoop(command, metricsRef.current)) return false;
+      const offset = nextTranscriptOffset(command, metricsRef.current);
+
+      // Key repeat outruns the native scroll event; reading the stale offset
+      // would make every press after the first a no-op.
+      metricsRef.current = { ...metricsRef.current, offsetY: offset };
+
+      if (offset === 0) {
+        commitFollowDecision(reduceTranscriptFollow(followStateRef.current, { type: 'request-follow' }));
+      }
+      listRef.current?.scrollToOffset({ offset, animated: false });
+      return true;
+    },
     scrollToLatest() {
       const decision = reduceTranscriptFollow(followStateRef.current, { type: 'request-follow' });
       commitFollowDecision(decision);
@@ -160,6 +184,11 @@ function VirtualizedTranscriptInner<ItemT>({
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
       const distanceFromLatest = Math.max(0, contentOffset.y);
+      metricsRef.current = {
+        offsetY: distanceFromLatest,
+        viewportHeight: layoutMeasurement.height,
+        contentHeight: contentSize.height,
+      };
       const decision = reduceTranscriptFollow(followStateRef.current, {
         type: 'scroll',
         contentHeight: contentSize.height,
@@ -181,6 +210,7 @@ function VirtualizedTranscriptInner<ItemT>({
   );
   const handleLayout = useCallback(
     (event: { nativeEvent: { layout: { height: number } } }) => {
+      metricsRef.current = { ...metricsRef.current, viewportHeight: event.nativeEvent.layout.height };
       commitFollowDecision(
         reduceTranscriptFollow(followStateRef.current, {
           type: 'layout',

@@ -63,6 +63,7 @@ import {
   type QuestionPromptPayload,
 } from '@/src/ux/session-interactions';
 import { createSessionSubagentListModel } from '@/src/ux/session-subagents';
+import { useDesktopContext, useScreenActions } from '@/src/ux/use-desktop-shell';
 import {
   growTranscriptWindow,
   INITIAL_TRANSCRIPT_WINDOW,
@@ -135,6 +136,19 @@ export default function SessionScreen() {
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const [transcriptWindowSize, setTranscriptWindowSize] = useState(INITIAL_TRANSCRIPT_WINDOW);
   const transcriptRef = useRef<VirtualizedTranscriptHandle>(null);
+
+  useDesktopContext('messages');
+
+  // Scrolling needs the list itself, so the desktop shell cannot do it from the
+  // store. Claim these only while this screen is mounted.
+  useScreenActions({
+    'scroll-page-up': () => { transcriptRef.current?.scroll('page-up'); },
+    'scroll-page-down': () => { transcriptRef.current?.scroll('page-down'); },
+    'scroll-half-page-up': () => { transcriptRef.current?.scroll('half-page-up'); },
+    'scroll-half-page-down': () => { transcriptRef.current?.scroll('half-page-down'); },
+    'scroll-to-first': () => { transcriptRef.current?.scroll('to-oldest'); },
+    'scroll-to-last': () => { transcriptRef.current?.scroll('to-latest'); },
+  });
 
   const activeHost = ref ? store.connections.find((connection) => connection.id === ref.connectionId) : undefined;
   const hostSessions = ref ? store.sessions[ref.connectionId] ?? [] : [];

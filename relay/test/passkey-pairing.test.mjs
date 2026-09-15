@@ -206,14 +206,18 @@ test('synchronizes phone names in both directions, then revokes the credential',
   assert.equal(controller.authenticateBearer(issued.connection.token), null);
 });
 
-test('no longer exposes the machine enrolment API that the tunnel transport needed', async () => {
+test('the pairing controller no longer claims the machine enrolment routes', async () => {
   const { baseUrl } = await fixture();
 
-  // These two routes drove the old flow: a remote machine asked for a device
-  // code, an owner approved it in the console, and the machine dialled back
-  // through an FRP/SSH tunnel. Transport is Tailscale's job now, and targets are
-  // declared statically, so the endpoints must be absent rather than merely
-  // unused -- an unreachable-but-live enrolment route is an open door.
+  // These routes drove the old flow: a remote machine asked for a device code,
+  // an owner approved it in the console, and the machine dialled back through an
+  // FRP/SSH tunnel. Transport is Tailscale's job now and targets are declared
+  // statically, so the controller must stop claiming these paths rather than
+  // merely stop using them -- an unreachable-but-live enrolment route is a door.
+  //
+  // 404 here is this fixture's fallback for an unclaimed route. The real relay
+  // answers an unauthenticated request with 401 whatever the path, so read these
+  // assertions as "the controller did not handle it", not as a deployed status.
   const deviceCode = await fetch(`${baseUrl}/api/oauth/device/code`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

@@ -181,6 +181,12 @@ export interface MobileStore {
   loadOlderMessages(ref: SessionInput): Promise<void>;
   searchFileReferences(query: string, ref?: SessionInput): Promise<FileReference[]>;
   startNewSessionPrompt(): void;
+  createSession(input: {
+    connectionId: string;
+    relayTargetID?: string;
+    directory?: string;
+    title?: string;
+  }): Promise<SessionRef | null>;
   sendPrompt(text: string): Promise<string | null>;
   /** Removes legacy records; it never dispatches them. */
   flushQueuedPrompts(connectionId?: string): Promise<void>;
@@ -822,7 +828,26 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
   },
 
   startNewSessionPrompt() {
-    set({ error: 'OpenCode Mobile controls existing sessions and does not create sessions.' });
+    // Creation itself lives in createSession; this only clears a stale banner so
+    // the screen that offers the choices opens on a clean slate.
+    set({ error: null });
+  },
+
+  async createSession({ connectionId, relayTargetID, directory, title }) {
+    const connection = get().connections.find((item) => item.id === connectionId);
+    if (!connection) {
+      set({ error: 'Select a host before creating a session.' });
+      return null;
+    }
+    try {
+      const session = await clientFor(connection, relayTargetID).createSession(title, directory);
+      const ref = sessionRefFor(connectionId, { ...session, relayTargetID });
+      set((state) => applySessionUpdate(state, ref, session));
+      return ref;
+    } catch (error) {
+      set({ error: errorMessage(error) });
+      return null;
+    }
   },
 
   async sendPrompt(text) {
@@ -907,8 +932,16 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
       set({ error: errorMessage(error) });
       return null;
     }
-    set({ error: 'OpenCode Mobile controls existing sessions and does not create or fork sessions.' });
-    return null;
+    const { ref, connection } = requireSessionContext(input, get());
+    try {
+      const forked = await clientFor(connection, ref.relayTargetID).forkSession(ref.sessionId, _messageId);
+      const forkedRef = sessionRefFor(ref.connectionId, { ...forked, relayTargetID: ref.relayTargetID });
+      set((state) => applySessionUpdate(state, forkedRef, forked));
+      return forkedRef.sessionId;
+    } catch (error) {
+      set({ error: errorMessage(error) });
+      return null;
+    }
   },
 
   async compactSession(input) {

@@ -679,34 +679,65 @@ describe('mobile store composite relay contract', () => {
     expect(failureCalls).toHaveLength(1);
   });
 
-  it('never creates a session when no existing session is active', async () => {
-    const fetchMock = vi.fn();
+  it('creates a session on the chosen machine and puts it at the top of the list', async () => {
+    const created = { id: 'ses_new', title: 'New Session', directory: '/repo', time: { created: 2, updated: 2 } };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(created), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
     vi.stubGlobal('fetch', fetchMock);
     const { useOpenCodeMobileStore } = await import('./mobile-store');
-    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id, activeSessionRef: null });
+    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id, sessions: {} });
 
-    await expect(useOpenCodeMobileStore.getState().sendPrompt('Do not create')).resolves.toBeNull();
-    useOpenCodeMobileStore.getState().startNewSessionPrompt();
+    const ref = await useOpenCodeMobileStore.getState().createSession({
+      connectionId: host.id,
+      relayTargetID: 'mac',
+      directory: '/repo',
+      title: 'New Session',
+    });
 
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(useOpenCodeMobileStore.getState().error).toContain('does not create sessions');
+    expect(fetchMock).toHaveBeenCalled();
+    expect(ref).toMatchObject({ connectionId: host.id, relayTargetID: 'mac', sessionId: 'ses_new' });
+    const stored = useOpenCodeMobileStore.getState().sessions[host.id] ?? [];
+    expect(stored.map((session) => session.id)).toContain('ses_new');
+    // The session has to carry the machine it was created on, or later requests
+    // would be routed to whichever backend answers first.
+    expect(stored.find((session) => session.id === 'ses_new')?.relayTargetID).toBe('mac');
   });
 
-  it('does not expose fork as a backdoor session-creation operation', async () => {
-    const fetchMock = vi.fn();
+  it('reports a refused creation instead of returning a ref to nothing', async () => {
+    const fetchMock = vi.fn(async () => new Response('no', { status: 500 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { useOpenCodeMobileStore } = await import('./mobile-store');
+    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id, sessions: {} });
+
+    const ref = await useOpenCodeMobileStore.getState().createSession({ connectionId: host.id, relayTargetID: 'mac' });
+
+    expect(ref).toBeNull();
+    expect(useOpenCodeMobileStore.getState().error).toBeTruthy();
+    expect(useOpenCodeMobileStore.getState().sessions[host.id] ?? []).toEqual([]);
+  });
+
+  it('forks a session and keeps the fork on the machine it came from', async () => {
+    const forked = { id: 'ses_fork', title: 'Fork', directory: '/repo', time: { created: 3, updated: 3 } };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(forked), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
     vi.stubGlobal('fetch', fetchMock);
     const { useOpenCodeMobileStore } = await import('./mobile-store');
     const ref = { connectionId: host.id, relayTargetID: 'mac', sessionId: 'session-1' };
     useOpenCodeMobileStore.setState({
       connections: [host],
       activeConnectionId: host.id,
-      sessions: { [host.id]: [{ id: ref.sessionId, relayTargetID: 'mac', directory: '/repo' }] },
+      sessions: { [host.id]: [{ id: ref.sessionId, relayTargetID: 'mac', directory: '/repo' } as Session] },
     });
 
-    await expect(useOpenCodeMobileStore.getState().forkSession(ref, 'message-1')).resolves.toBeNull();
+    await expect(useOpenCodeMobileStore.getState().forkSession(ref, 'message-1')).resolves.toBe('ses_fork');
 
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(useOpenCodeMobileStore.getState().error).toContain('does not create or fork sessions');
+    expect(fetchMock).toHaveBeenCalled();
+    const stored = useOpenCodeMobileStore.getState().sessions[host.id] ?? [];
+    expect(stored.find((session) => session.id === 'ses_fork')?.relayTargetID).toBe('mac');
   });
 
   it('keeps existing-session controls routed to the selected relay target', async () => {

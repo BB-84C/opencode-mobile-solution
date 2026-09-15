@@ -1,9 +1,11 @@
+import { useLocalSearchParams } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { ActionModal } from '@/src/components/opencode/ActionModal';
 import { TextViewModal } from '@/src/components/opencode/TextViewModal';
 import type { FileDiff } from '@/src/opencode/types';
+import { sessionStateKey, useOpenCodeMobileStore } from '@/src/store/mobile-store';
 import { palette } from '@/src/ui/palette';
 import { writeClipboardText } from '@/src/ux/clipboard';
 import { createDiffCopyModel } from '@/src/ux/session-diff';
@@ -33,13 +35,36 @@ export default function DiffPreviewScreen() {
   const [actionsVisible, setActionsVisible] = useState(false);
   const [textViewVisible, setTextViewVisible] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const model = useMemo(() => createDiffCopyModel(previewDiffs), []);
+
+  const params = useLocalSearchParams<{ connectionId?: string; machine?: string; session?: string }>();
+  const diffsByKey = useOpenCodeMobileStore((state) => state.diffs);
+
+  // Addressed by route rather than by whatever session happens to be active, so
+  // a diff opened from one session cannot show another session's changes.
+  const live = useMemo(() => {
+    if (!params.connectionId || !params.session) return null;
+    const key = sessionStateKey({
+      connectionId: params.connectionId,
+      relayTargetID: params.machine ?? '',
+      sessionId: params.session,
+    });
+    return diffsByKey[key] ?? [];
+  }, [diffsByKey, params.connectionId, params.machine, params.session]);
+
+  const diffs = live ?? previewDiffs;
+  const model = useMemo(() => createDiffCopyModel(diffs), [diffs]);
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <View testID="diff-preview-header" style={styles.header}>
         <Text testID="diff-preview-title" style={styles.title}>Diff preview</Text>
-        <Text testID="diff-preview-subtitle" style={styles.muted}>Local fixture for unified diff copy QA.</Text>
+        <Text testID="diff-preview-subtitle" style={styles.muted}>
+            {live === null
+              ? 'Local fixture for unified diff copy QA.'
+              : live.length === 0
+                ? 'No changes in this session yet.'
+                : `${live.length} changed file${live.length === 1 ? '' : 's'} in this session.`}
+          </Text>
       </View>
       <Pressable
         accessibilityRole="button"

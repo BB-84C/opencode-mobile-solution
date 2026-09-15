@@ -148,6 +148,15 @@ export default function SessionScreen() {
     'scroll-half-page-down': () => { transcriptRef.current?.scroll('half-page-down'); },
     'scroll-to-first': () => { transcriptRef.current?.scroll('to-oldest'); },
     'scroll-to-last': () => { transcriptRef.current?.scroll('to-latest'); },
+    // The diff belongs to this session, so it is addressed by route rather than
+    // read from whichever session happens to be active when the page opens.
+    'entrypoint:diffs': () => {
+      if (!ref) return;
+      router.push({
+        pathname: '/diff-preview',
+        params: { connectionId: ref.connectionId, machine: ref.relayTargetID ?? '', session: ref.sessionId },
+      });
+    },
   });
 
   const activeHost = ref ? store.connections.find((connection) => connection.id === ref.connectionId) : undefined;

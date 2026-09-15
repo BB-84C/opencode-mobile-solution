@@ -9,6 +9,7 @@ import { useColorScheme } from '@/components/useColorScheme';
 import { palette } from '@/src/ui/palette';
 import { flushMobileSessionPersistence, useOpenCodeMobileStore } from '@/src/store/mobile-store';
 import { settingsModalOptions } from '@/src/ux/settings-navigation';
+import { useDesktopShell } from '@/src/ux/use-desktop-shell';
 
 export {
   // Catch any errors thrown by the Layout component.
@@ -48,6 +49,7 @@ export default function RootLayout() {
 
 function RootLayoutNav() {
   useColorScheme();
+  useDesktopShell();
   const hydrate = useOpenCodeMobileStore((state) => state.hydrate);
   useEffect(() => {
     void hydrate();

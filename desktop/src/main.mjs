@@ -151,6 +151,26 @@ async function runSmoke(window, outputDir) {
     const errors = await window.webContents.executeJavaScript("window.__cockpitErrors ?? []");
     await fs.writeFile(path.join(outputDir, "console-errors.json"), JSON.stringify(errors, null, 2));
 
+    // Press a key for real and look for its consequence in the page. Anything
+    // less proves the shell resolved a binding, not that the app acted on it:
+    // the chain from keymap through IPC, routing and the store is only tested
+    // by something the user could have seen.
+    if (process.env.COCKPIT_SMOKE_KEY) {
+      const [key, ...modifiers] = process.env.COCKPIT_SMOKE_KEY.split("+").reverse();
+      window.webContents.focus();
+      window.webContents.sendInputEvent({ type: "keyDown", keyCode: key, modifiers });
+      window.webContents.sendInputEvent({ type: "keyUp", keyCode: key, modifiers });
+      await new Promise((done) => setTimeout(done, 1_200));
+
+      const afterKey = await window.webContents.executeJavaScript("document.body.innerText");
+      await fs.writeFile(path.join(outputDir, "body-after-key.txt"), afterKey ?? "");
+      process.stdout.write(`smoke: pressed ${process.env.COCKPIT_SMOKE_KEY}\n`);
+
+      if ((afterKey ?? "") === (text ?? "")) {
+        failures.push(`pressing ${process.env.COCKPIT_SMOKE_KEY} changed nothing on screen`);
+      }
+    }
+
     if (image.isEmpty()) failures.push("the window painted nothing");
     if (!text || text.trim().length === 0) failures.push("the page rendered no text");
     if (errors.length > 0) failures.push(`${errors.length} console error(s)`);

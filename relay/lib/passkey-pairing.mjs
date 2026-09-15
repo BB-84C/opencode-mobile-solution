@@ -7,7 +7,6 @@ import {
 import QRCode from 'qrcode';
 
 import { PairingStore, PairingStoreError } from './pairing-store.mjs';
-import { projectRelayStatus } from './machine-status-monitor.mjs';
 
 const SESSION_COOKIE = 'oc_relay_session';
 const MAX_BODY_BYTES = 128 * 1_024;
@@ -106,62 +105,6 @@ function bearerToken(req) {
   return typeof value === 'string' && value.startsWith('Bearer ') ? value.slice(7) : '';
 }
 
-function machineTargetID(request) {
-  if (request.requestedTargetID) return request.requestedTargetID;
-  const slug = request.hostname.toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 42) || 'opencode-machine';
-  return `${slug}-${request.installationID.replace(/[^a-zA-Z0-9]/g, '').slice(-8).toLowerCase()}`;
-}
-
-function allocateMachineAssignment({ request, snapshot, machines, transport }) {
-  if (!transport?.frpToken) throw new HttpError(503, 'Machine transport is not configured', 'machine_transport_unavailable');
-  const existing = machines.find((machine) => machine.installationID === request.installationID);
-  const targetID = request.requestedTargetID || existing?.targetID || machineTargetID(request);
-  const conflictingMachine = machines.find(
-    (machine) => machine.targetID === targetID && machine.installationID !== request.installationID,
-  );
-  if (conflictingMachine) throw new HttpError(409, 'Requested target is assigned to another machine', 'target_conflict');
-
-  const staticTarget = snapshot.targets.get(targetID);
-  if (staticTarget && request.requestedRemotePort && staticTarget.port !== request.requestedRemotePort) {
-    throw new HttpError(409, 'Requested port does not match the existing relay target', 'port_conflict');
-  }
-  const usedPorts = new Set([
-    ...[...snapshot.targets.values()].map((target) => target.port),
-    ...machines.filter((machine) => machine.installationID !== request.installationID).map((machine) => machine.port),
-  ]);
-  let remotePort = request.requestedRemotePort || staticTarget?.port || existing?.port || null;
-  if (remotePort !== null && usedPorts.has(remotePort) && staticTarget?.port !== remotePort) {
-    throw new HttpError(409, 'Requested relay port is already assigned', 'port_conflict');
-  }
-  if (remotePort === null) {
-    const minimum = transport.remotePortMin ?? 4100;
-    const maximum = transport.remotePortMax ?? 4199;
-    for (let candidate = minimum; candidate <= maximum; candidate += 1) {
-      if (!usedPorts.has(candidate)) {
-        remotePort = candidate;
-        break;
-      }
-    }
-  }
-  if (remotePort === null) throw new HttpError(503, 'No relay port is available', 'port_pool_exhausted');
-
-  return {
-    targetID,
-    remotePort,
-    displayTargetName: staticTarget?.displayName || request.displayName,
-    transport: {
-      type: 'frp-ssh',
-      frpServerHost: transport.frpsHost || '127.0.0.1',
-      frpServerPort: transport.frpServerPort ?? 7000,
-      localForwardPort: transport.localForwardPort ?? 17000,
-      frpToken: transport.frpToken,
-    },
-  };
-}
-
 function dashboardHtml() {
   return `<!doctype html>
 <html lang="en">
@@ -191,14 +134,12 @@ function dashboardHtml() {
   </style>
 </head>
 <body><main>
-  <div class="brand"><div class="mark" aria-hidden="true"></div><div class="brand-copy"><h1>OpenCode Relay</h1><p class="subtitle">Passkey-protected machines and phones</p></div></div>
+  <div class="brand"><div class="mark" aria-hidden="true"></div><div class="brand-copy"><h1>OpenCode Relay</h1><p class="subtitle">Passkey-protected devices</p></div></div>
   <section class="card overview">
-    <div class="section-copy"><div id="status" class="status">Checking passkey…</div><p id="explanation">Sign in once to manage every connected OpenCode machine and phone.</p></div>
+    <div class="section-copy"><div id="status" class="status">Checking passkey…</div><p id="explanation">Sign in once to manage every device authorized to reach this host.</p></div>
     <div class="overview-actions"><button id="primary" disabled>Loading…</button><button id="refresh" class="secondary hidden">Refresh</button></div>
   </section>
   <div id="authenticated" class="authenticated hidden">
-    <section class="card"><div class="section-head"><div class="section-copy"><h2>Pending machine authorization</h2><p>Requests from <code>opencode --relay_server start</code> expire automatically.</p></div><span id="pending-count" class="count"></span></div><div id="pending" class="grid"></div></section>
-    <section class="card"><div class="section-head"><div class="section-copy"><h2>Machines</h2><p>Local OpenCode, outbound tunnel, and public reachability are checked separately.</p></div><span id="machine-count" class="count"></span></div><div id="machines" class="grid"></div></section>
     <section class="card"><div class="section-head"><div class="section-copy"><h2>Authorized phones</h2><p>Phone credentials remain valid until you revoke them here.</p></div><button id="connect-phone">Connect phone</button></div><div id="devices" class="grid"></div><div id="pairing" class="pairing hidden"><div id="qr" aria-label="Phone pairing QR code"></div><p id="expiry"></p></div></section>
   </div>
   <p id="error" class="error hidden"></p>
@@ -397,10 +338,6 @@ const nodes = {
   primary: document.querySelector('#primary'),
   refresh: document.querySelector('#refresh'),
   authenticated: document.querySelector('#authenticated'),
-  pending: document.querySelector('#pending'),
-  pendingCount: document.querySelector('#pending-count'),
-  machines: document.querySelector('#machines'),
-  machineCount: document.querySelector('#machine-count'),
   devices: document.querySelector('#devices'),
   connectPhone: document.querySelector('#connect-phone'),
   pairing: document.querySelector('#pairing'),
@@ -479,97 +416,6 @@ function actionButton(label, className, callback) {
   });
   return button;
 }
-function renderPending(pending) {
-  nodes.pending.replaceChildren();
-  nodes.pendingCount.textContent = String(pending.length);
-  if (pending.length === 0) {
-    nodes.pending.append(empty('No pending requests. Start relay_server on a machine to authorize it here.'));
-    return;
-  }
-  const focus = requestedUserCode().toUpperCase();
-  for (const authorization of pending) {
-    const row = document.createElement('div');
-    row.className = 'row' + (focus && focus === authorization.userCode ? ' pending-focus' : '');
-    const main = document.createElement('div');
-    main.className = 'row-main';
-    const title = document.createElement('div');
-    title.className = 'row-title';
-    const name = document.createElement('strong');
-    name.textContent = authorization.displayName;
-    const code = document.createElement('span');
-    code.className = 'code';
-    code.textContent = authorization.userCode;
-    title.append(name, code);
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    meta.textContent = authorization.platform + ' · ' + authorization.hostname + ' · requested ' + (authorization.requestedTargetID || 'automatic target') + ' · expires ' + when(authorization.expiresAt);
-    main.append(title, meta);
-    const actions = document.createElement('div');
-    actions.className = 'actions';
-    actions.append(
-      actionButton('Approve', '', async () => {
-        await api('/api/machine/approve', { userCode: authorization.userCode });
-        history.replaceState(null, '', location.pathname);
-        await loadStatus();
-      }),
-      actionButton('Deny', 'secondary', async () => {
-        await api('/api/machine/deny', { userCode: authorization.userCode });
-        await loadStatus();
-      }),
-    );
-    row.append(main, actions);
-    nodes.pending.append(row);
-  }
-}
-function renderMachines(machines) {
-  nodes.machines.replaceChildren();
-  const active = machines.filter(machine => !machine.revokedAt).length;
-  nodes.machineCount.textContent = active + ' active · ' + machines.length + ' total';
-  if (machines.length === 0) {
-    nodes.machines.append(empty('No machine has been authorized yet.'));
-    return;
-  }
-  for (const machine of machines) {
-    const row = document.createElement('div');
-    row.className = 'row';
-    const main = document.createElement('div');
-    main.className = 'row-main';
-    const title = document.createElement('div');
-    title.className = 'row-title';
-    const name = document.createElement('strong');
-    name.textContent = machine.displayName;
-    const badge = document.createElement('span');
-    const state = machine.state || (machine.revokedAt ? 'revoked' : 'offline');
-    badge.className = 'badge ' + state;
-    const dot = document.createElement('span');
-    dot.className = 'dot';
-    badge.append(dot, document.createTextNode(state));
-    title.append(name, badge);
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    const local = machine.localHealthy ? 'local 4096 ready' : 'local 4096 unavailable';
-    const publicLink = machine.publicReachable ? 'relay reachable' : 'relay unreachable';
-    meta.textContent = machine.platform + ' · ' + machine.hostname + ' · ' + machine.targetID + ' :' + machine.port + ' · ' + local + ' · ' + publicLink + ' · heartbeat ' + when(machine.lastHeartbeatAt);
-    main.append(title, meta);
-    const actions = document.createElement('div');
-    actions.className = 'actions';
-    actions.append(actionButton('Rename', 'secondary', async () => {
-      const displayName = prompt('Machine name', machine.displayName);
-      if (displayName === null) return;
-      await api('/api/machine/rename', { machineID: machine.machineID, displayName });
-      await loadStatus();
-    }));
-    if (!machine.revokedAt) {
-      actions.append(actionButton('Revoke', 'danger', async () => {
-        if (!confirm('Revoke relay access for ' + machine.displayName + '?')) return;
-        await api('/api/machine/revoke', { machineID: machine.machineID });
-        await loadStatus();
-      }));
-    }
-    row.append(main, actions);
-    nodes.machines.append(row);
-  }
-}
 function renderDevices(devices) {
   nodes.devices.replaceChildren();
   if (devices.length === 0) {
@@ -614,12 +460,10 @@ async function loadStatus() {
   currentState = await api('/api/passkey/status');
   if (currentState.authenticated) {
     nodes.status.textContent = 'Passkey verified';
-    nodes.explanation.textContent = 'Manage machine links and permanent phone authorizations.';
+    nodes.explanation.textContent = 'Manage the devices authorized to reach this host.';
     nodes.primary.classList.add('hidden');
     nodes.refresh.classList.remove('hidden');
     nodes.authenticated.classList.remove('hidden');
-    renderPending(currentState.pendingMachines || []);
-    renderMachines(currentState.machines || []);
     renderDevices(currentState.devices || []);
     return;
   }
@@ -627,7 +471,7 @@ async function loadStatus() {
   nodes.refresh.classList.add('hidden');
   nodes.primary.classList.remove('hidden');
   if (currentState.configured) {
-    nodes.status.textContent = requestedUserCode() ? 'Approve this machine with your passkey' : 'Passkey required';
+    nodes.status.textContent = 'Passkey required';
     nodes.explanation.textContent = 'No relay username, password, or token needs to be typed.';
     nodes.primary.textContent = 'Sign in with passkey';
     nodes.primary.disabled = false;
@@ -700,10 +544,7 @@ export function createPasskeyPairing({
   bootstrapToken,
   pairingSourceClientID,
   getSnapshot,
-  machineTransport = null,
-  getMachineStatuses = async (machines) => machines,
   onDeviceRevoked = () => {},
-  onMachineRevoked = () => {},
   store = new PairingStore({ statePath, bootstrapToken }),
 }) {
   const origin = validatePublicOrigin(publicOrigin);
@@ -911,124 +752,16 @@ export function createPasskeyPairing({
     sendJson(res, 200, { revoked: true });
   }
 
-  async function createMachineDeviceCode(req, res) {
-    rateLimit(req, 'machine-device-code', 12);
-    const body = await readJson(req);
-    const grant = store.createMachineAuthorization(body);
-    const verificationUri = `${origin}/`;
-    const verificationUriComplete = `${origin}/?user_code=${encodeURIComponent(grant.userCode)}`;
-    sendJson(res, 200, {
-      device_code: grant.deviceCode,
-      user_code: grant.userCode,
-      verification_uri: verificationUri,
-      verification_uri_complete: verificationUriComplete,
-      expires_in: Math.max(1, Math.floor((grant.expiresAt - Date.now()) / 1_000)),
-      interval: Math.max(1, Math.ceil(grant.intervalMs / 1_000)),
-    });
-  }
 
-  async function pollMachineToken(req, res) {
-    rateLimit(req, 'machine-token', 120);
-    const body = await readJson(req);
-    try {
-      const issued = store.pollMachineAuthorization(body.device_code);
-      sendJson(res, 200, {
-        token_type: 'Bearer',
-        access_token: issued.accessToken,
-        machine: issued.machine,
-        transport: issued.transport,
-        relay_origin: origin,
-      });
-    } catch (error) {
-      if (!(error instanceof PairingStoreError)) throw error;
-      sendJson(res, 400, { error: error.code, error_description: error.message });
-    }
-  }
 
-  async function approveMachine(req, res) {
-    requireSameOrigin(req);
-    requireAuthenticated(req);
-    const body = await readJson(req);
-    const request = store.machineAuthorizationRequest(body.userCode);
-    if (!request) throw new HttpError(404, 'Machine authorization was not found', 'authorization_not_found');
-    const assignment = allocateMachineAssignment({
-      request,
-      snapshot: getSnapshot(),
-      machines: store.listMachines(),
-      transport: machineTransport,
-    });
-    const machine = store.approveMachineAuthorization(body.userCode, assignment);
-    sendJson(res, 200, { approved: true, machine });
-  }
 
-  async function denyMachine(req, res) {
-    requireSameOrigin(req);
-    requireAuthenticated(req);
-    const body = await readJson(req);
-    if (!store.denyMachineAuthorization(body.userCode)) {
-      throw new HttpError(404, 'Machine authorization was not found', 'authorization_not_found');
-    }
-    sendJson(res, 200, { denied: true });
-  }
 
-  function requireMachine(req) {
-    const machine = store.authenticateMachine(bearerToken(req));
-    if (!machine) throw new HttpError(401, 'Machine credential is invalid or revoked', 'invalid_machine_token');
-    return machine;
-  }
 
-  async function machineHeartbeat(req, res) {
-    rateLimit(req, 'machine-heartbeat', 180);
-    const machine = requireMachine(req);
-    const heartbeat = await readJson(req);
-    const updated = store.updateMachineHeartbeat(machine.machineID, heartbeat);
-    const status = (await getMachineStatuses([updated]))[0];
-    sendJson(res, 200, { accepted: true, relayStatus: projectRelayStatus(status) });
-  }
 
-  async function machineMe(req, res) {
-    const machine = requireMachine(req);
-    sendJson(res, 200, { machine });
-  }
 
-  async function renameOwnMachine(req, res) {
-    rateLimit(req, 'machine-rename', 60);
-    const machine = requireMachine(req);
-    const body = await readJson(req);
-    const renamed = store.renameMachine(machine.machineID, body.displayName);
-    sendJson(res, 200, { renamed: true, machine: renamed });
-  }
 
-  async function revokeOwnMachine(req, res) {
-    rateLimit(req, 'machine-revoke-self', 12);
-    const machine = requireMachine(req);
-    if (!store.revokeMachine(machine.machineID)) {
-      throw new HttpError(404, 'Machine was not found or is already revoked', 'machine_not_found');
-    }
-    onMachineRevoked(machine);
-    sendJson(res, 200, { revoked: true });
-  }
 
-  async function renameMachine(req, res) {
-    requireSameOrigin(req);
-    requireAuthenticated(req);
-    const body = await readJson(req);
-    const machine = store.renameMachine(body.machineID, body.displayName);
-    if (!machine) throw new HttpError(404, 'Machine was not found', 'machine_not_found');
-    sendJson(res, 200, { renamed: true, machine });
-  }
 
-  async function revokeMachine(req, res) {
-    requireSameOrigin(req);
-    requireAuthenticated(req);
-    const body = await readJson(req);
-    const machine = store.listMachines().find((candidate) => candidate.machineID === body.machineID);
-    if (!machine || !store.revokeMachine(body.machineID)) {
-      throw new HttpError(404, 'Machine was not found or is already revoked', 'machine_not_found');
-    }
-    onMachineRevoked(machine);
-    sendJson(res, 200, { revoked: true });
-  }
 
   async function dashboardStatus(req, res) {
     const authenticated = isAuthenticated(req);
@@ -1036,13 +769,9 @@ export function createPasskeyPairing({
       configured: store.hasCredentials(),
       authenticated,
       devices: [],
-      machines: [],
-      pendingMachines: [],
     };
     if (authenticated) {
       base.devices = store.listDevices();
-      base.pendingMachines = store.listPendingMachineAuthorizations();
-      base.machines = await getMachineStatuses(store.listMachines());
     }
     sendJson(res, 200, base);
   }
@@ -1069,30 +798,6 @@ export function createPasskeyPairing({
       }
       if (route === 'GET /api/passkey/status') {
         await dashboardStatus(req, res);
-        return true;
-      }
-      if (route === 'POST /api/oauth/device/code') {
-        await createMachineDeviceCode(req, res);
-        return true;
-      }
-      if (route === 'POST /api/oauth/token') {
-        await pollMachineToken(req, res);
-        return true;
-      }
-      if (route === 'GET /api/machine/me') {
-        await machineMe(req, res);
-        return true;
-      }
-      if (route === 'DELETE /api/machine/me') {
-        await revokeOwnMachine(req, res);
-        return true;
-      }
-      if (route === 'POST /api/machine/name') {
-        await renameOwnMachine(req, res);
-        return true;
-      }
-      if (route === 'POST /api/machine/heartbeat') {
-        await machineHeartbeat(req, res);
         return true;
       }
       if (route === 'POST /api/passkey/register/options') {
@@ -1143,22 +848,6 @@ export function createPasskeyPairing({
       }
       if (route === 'POST /api/pairing/revoke') {
         await revokePairing(req, res);
-        return true;
-      }
-      if (route === 'POST /api/machine/approve') {
-        await approveMachine(req, res);
-        return true;
-      }
-      if (route === 'POST /api/machine/deny') {
-        await denyMachine(req, res);
-        return true;
-      }
-      if (route === 'POST /api/machine/revoke') {
-        await revokeMachine(req, res);
-        return true;
-      }
-      if (route === 'POST /api/machine/rename') {
-        await renameMachine(req, res);
         return true;
       }
       return false;

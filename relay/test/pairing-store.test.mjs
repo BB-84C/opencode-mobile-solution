@@ -134,155 +134,56 @@ test('expires pairing codes without issuing a device credential', async () => {
   assert.deepEqual(store.listDevices(), []);
 });
 
-function machineRequest(overrides = {}) {
-  return {
-    installationID: 'installation-macbook-1234',
-    displayName: 'Siyu MacBook',
-    hostname: 'siyu-macbook',
-    platform: 'macos',
-    clientVersion: '2',
-    basicUsername: 'opencode',
-    basicPassword: 'local-basic-password-with-enough-entropy',
-    requestedTargetID: 'mac-opencode',
-    requestedRemotePort: 4098,
-    ...overrides,
-  };
-}
 
-test('upgrades legacy passkey state and persists machines in the new schema', async () => {
+test('upgrades a tunnel-era state file, dropping machines while keeping the owner and paired devices', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode-pairing-legacy-'));
   fixtureDirectories.add(directory);
   const statePath = path.join(directory, 'passkeys.json');
-  await fs.writeFile(statePath, JSON.stringify({ version: 1, owner: null, credentials: [], devices: [] }));
-  const store = new PairingStore({ statePath, bootstrapToken: 'bootstrap-secret-with-32-bytes' });
 
-  assert.deepEqual(store.listMachines(), []);
-  store.ensureOwner();
-  assert.equal(JSON.parse(await fs.readFile(statePath, 'utf8')).version, 2);
-});
-
-test('issues a machine token only after approval and never persists the raw token', async () => {
-  let now = 100_000;
-  const store = await fixtureStore({ now: () => now, machinePollIntervalMs: 1_000 });
-  const grant = store.createMachineAuthorization(machineRequest());
-
-  assert.match(grant.userCode, /^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
-  assert.equal(store.listPendingMachineAuthorizations()[0].basicPassword, undefined);
-  assert.throws(() => store.pollMachineAuthorization(grant.deviceCode), (error) => error.code === 'authorization_pending');
-
-  const approved = store.approveMachineAuthorization(grant.userCode, {
-    targetID: 'mac-opencode',
-    remotePort: 4098,
-    displayTargetName: 'MacBook',
-    transport: { type: 'frp-ssh', frpToken: 'server-frp-secret' },
-  });
-  assert.equal(approved.targetID, 'mac-opencode');
-  assert.equal(store.machineTargets()[0].displayName, 'Siyu MacBook');
-  now += 1_001;
-  const issued = store.pollMachineAuthorization(grant.deviceCode);
-  assert.equal(issued.transport.frpToken, 'server-frp-secret');
-  assert.equal(store.authenticateMachine(issued.accessToken).machineID, approved.machineID);
-  assert.throws(() => store.pollMachineAuthorization(grant.deviceCode), (error) => error.code === 'expired_token');
-
-  const persisted = await fs.readFile(store.statePath, 'utf8');
-  assert.equal(persisted.includes(issued.accessToken), false);
-  assert.equal(JSON.parse(persisted).machines[0].tokenHash.length, 64);
-});
-
-test('records machine heartbeat, exposes proxy credentials only internally, and revokes access', async () => {
-  const store = await fixtureStore();
-  const grant = store.createMachineAuthorization(machineRequest());
-  const machine = store.approveMachineAuthorization(grant.userCode, {
-    targetID: 'mac-opencode',
-    remotePort: 4098,
-    transport: { type: 'frp-ssh', frpToken: 'server-frp-secret' },
-  });
-  const target = store.machineTargets()[0];
-
-  assert.equal(target.basicPass, 'local-basic-password-with-enough-entropy');
-  assert.equal(store.listMachines()[0].basicPass, undefined);
-  const heartbeat = store.updateMachineHeartbeat(machine.machineID, {
-    localHealth: true,
-    opencodeVersion: '1.17.18',
-    controllerVersion: '2',
-  });
-  assert.equal(heartbeat.heartbeat.lifecycle, 'running');
-  assert.equal(heartbeat.heartbeat.localHealth, true);
-  const stopped = store.updateMachineHeartbeat(machine.machineID, {
-    lifecycle: 'stopped',
-    localHealth: false,
-    opencodeVersion: '1.17.18',
-    controllerVersion: '2',
-  });
-  assert.equal(stopped.heartbeat.lifecycle, 'stopped');
-  assert.equal(store.revokeMachine(machine.machineID), true);
-  assert.deepEqual(store.machineTargets(), []);
-  assert.equal(store.listMachines()[0].revokedAt !== null, true);
-});
-
-test('renames a machine across dashboard, discovery, and machine identity without rotating routing', async () => {
-  let now = 300_000;
-  const store = await fixtureStore({ now: () => now, machinePollIntervalMs: 1 });
-  const grant = store.createMachineAuthorization(machineRequest());
-  const approved = store.approveMachineAuthorization(grant.userCode, {
-    targetID: 'mac-opencode',
-    remotePort: 4098,
-    displayTargetName: 'MacBook',
-    transport: { type: 'frp-ssh', frpToken: 'server-frp-secret' },
-  });
-  now += 2;
-  const issued = store.pollMachineAuthorization(grant.deviceCode);
-
-  now += 1_000;
-  const renamed = store.renameMachine(approved.machineID, '  Studio Mac  ');
-  assert.equal(renamed.displayName, 'Studio Mac');
-  assert.equal(renamed.displayNameRevision, 2);
-  assert.deepEqual(
-    store.machineTargets().map(({ targetID, displayName, port }) => ({ targetID, displayName, port })),
-    [{ targetID: 'mac-opencode', displayName: 'Studio Mac', port: 4098 }],
-  );
-  assert.equal(store.authenticateMachine(issued.accessToken).displayName, 'Studio Mac');
-  assert.throws(() => store.renameMachine(approved.machineID, '\n\t'), /must not be empty/i);
-  assert.equal(store.renameMachine('missing-machine', 'No machine'), null);
-});
-
-test('migrates a legacy split Dashboard/discovery name to the canonical Dashboard name', async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode-pairing-split-name-'));
-  fixtureDirectories.add(directory);
-  const statePath = path.join(directory, 'passkeys.json');
+  // Shape written by the relay that still enrolled machines over a tunnel. An
+  // existing deployment has exactly this on disk, so the upgrade must not throw
+  // and must not cost the owner their credential or their paired phones.
   await fs.writeFile(statePath, JSON.stringify({
     version: 2,
-    owner: null,
-    credentials: [],
-    devices: [],
-    machines: [{
-      machineID: 'machine-legacy-windows',
-      installationID: 'installation-windows-legacy',
-      displayName: 'Woody',
-      displayTargetName: 'Windows workstation',
-      displayNameRevision: null,
-      displayNameUpdatedAt: null,
-      targetID: 'home-opencode',
-      host: '127.0.0.1',
-      port: 4096,
-      basicUser: 'opencode',
-      basicPass: 'legacy-basic-password',
-      authorizedAt: '2026-07-14T17:18:45.299Z',
-      revokedAt: null,
+    owner: { userID: 'owner-user-id', userName: 'owner' },
+    credentials: [{ id: 'credential-id', publicKey: 'cHVibGlj', counter: 4 }],
+    devices: [{
+      clientID: 'phone-1',
+      displayName: 'iPhone',
+      tokenHash: 'a'.repeat(64),
+      targetID: 'mac',
+      targetIDs: ['mac'],
+      pinnedDirectory: null,
+      allowedDirectories: null,
     }],
+    machines: [{ machineID: 'machine-1', displayName: 'Old MacBook', targetID: 'mac-opencode', port: 4098 }],
   }));
 
   const store = new PairingStore({ statePath, bootstrapToken: 'bootstrap-secret-with-32-bytes' });
-  const machine = store.listMachines()[0];
-  assert.equal(machine.displayName, 'Woody');
-  assert.equal(machine.displayTargetName, 'Woody');
-  assert.equal(machine.displayNameRevision, 1);
-  assert.equal(machine.displayNameUpdatedAt, machine.authorizedAt);
-  assert.equal(store.machineTargets()[0].displayName, 'Woody');
 
+  assert.equal(store.hasCredentials(), true);
+  assert.equal(store.listDevices().length, 1);
+  assert.equal(store.listDevices()[0].clientID, 'phone-1');
+  assert.equal(store.listDevices()[0].tokenHash, undefined);
+
+  store.ensureOwner();
   const persisted = JSON.parse(await fs.readFile(statePath, 'utf8'));
-  assert.equal(persisted.machines[0].displayName, 'Woody');
-  assert.equal(persisted.machines[0].displayTargetName, 'Woody');
-  assert.equal(persisted.machines[0].displayNameRevision, 1);
-  assert.equal(persisted.machines[0].displayNameUpdatedAt, machine.authorizedAt);
+  assert.equal(persisted.version, 3);
+  assert.equal(persisted.machines, undefined);
+  assert.equal(persisted.credentials.length, 1);
+  assert.equal(persisted.devices.length, 1);
+});
+
+test('rejects a state file whose version it does not understand', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode-pairing-future-'));
+  fixtureDirectories.add(directory);
+  const statePath = path.join(directory, 'passkeys.json');
+  await fs.writeFile(statePath, JSON.stringify({ version: 99, owner: null, credentials: [], devices: [] }));
+
+  // Silently starting with empty state would drop every paired device, so an
+  // unreadable file must surface instead of being treated as a fresh install.
+  assert.throws(
+    () => new PairingStore({ statePath, bootstrapToken: 'bootstrap-secret-with-32-bytes' }),
+    /unsupported passkey state/,
+  );
 });

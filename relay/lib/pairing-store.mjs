@@ -5,17 +5,13 @@ import path from 'node:path';
 const DEFAULT_WEB_SESSION_TTL_MS = 12 * 60 * 60 * 1_000;
 const DEFAULT_PAIRING_TTL_MS = 2 * 60 * 1_000;
 const DEFAULT_CEREMONY_TTL_MS = 5 * 60 * 1_000;
-const DEFAULT_MACHINE_AUTH_TTL_MS = 10 * 60 * 1_000;
-const DEFAULT_MACHINE_POLL_INTERVAL_MS = 5_000;
-const USER_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 function emptyState() {
   return {
-    version: 2,
+    version: 3,
     owner: null,
     credentials: [],
     devices: [],
-    machines: [],
   };
 }
 
@@ -45,33 +41,18 @@ function equalSecrets(candidate, expected) {
 }
 
 function validateState(value) {
-  if (!value || typeof value !== 'object' || ![1, 2].includes(value.version)) {
+  if (!value || typeof value !== 'object' || ![1, 2, 3].includes(value.version)) {
     throw new Error('unsupported passkey state');
   }
   if (!Array.isArray(value.credentials) || !Array.isArray(value.devices)) {
     throw new Error('invalid passkey state');
   }
-  if (value.version === 1) return { ...value, version: 2, machines: [] };
-  if (!Array.isArray(value.machines)) throw new Error('invalid machine state');
-  return { ...value, machines: value.machines.map(normalizeMachineIdentity) };
-}
-
-function normalizeMachineIdentity(machine) {
-  if (!machine || typeof machine !== 'object') throw new Error('invalid machine state');
-  const displayName = cleanText(machine.displayName, cleanText(machine.displayTargetName, 'OpenCode machine'));
-  const displayNameRevision = Number.isInteger(machine.displayNameRevision) && machine.displayNameRevision > 0
-    ? machine.displayNameRevision
-    : 1;
-  const displayNameUpdatedAt = typeof machine.displayNameUpdatedAt === 'string' && machine.displayNameUpdatedAt
-    ? machine.displayNameUpdatedAt
-    : machine.authorizedAt ?? machine.createdAt ?? new Date(0).toISOString();
-  return {
-    ...machine,
-    displayName,
-    displayTargetName: displayName,
-    displayNameRevision,
-    displayNameUpdatedAt,
-  };
+  // Versions 1 and 2 predate the removal of machine enrolment. A state file
+  // written by the tunnel-era relay carries a `machines` array that nothing
+  // reads any more; drop it rather than reject the file, so an existing
+  // deployment keeps its owner credential and its paired devices on upgrade.
+  const { machines, ...rest } = value;
+  return { ...rest, version: 3 };
 }
 
 function cleanText(value, fallback, maximum = 80) {
@@ -91,42 +72,6 @@ function cleanEditableName(value) {
   return normalized;
 }
 
-function cleanMachineRequest(value) {
-  if (!value || typeof value !== 'object') throw new Error('machine authorization request is required');
-  const installationID = cleanText(value.installationID, '', 128);
-  const basicUsername = cleanText(value.basicUsername, '', 80);
-  const basicPassword = typeof value.basicPassword === 'string' ? value.basicPassword : '';
-  const requestedTargetID = typeof value.requestedTargetID === 'string'
-    ? value.requestedTargetID.trim().toLowerCase()
-    : '';
-  const requestedRemotePort = value.requestedRemotePort === undefined || value.requestedRemotePort === null
-    ? null
-    : Number(value.requestedRemotePort);
-  if (!/^[A-Za-z0-9._:-]{8,128}$/.test(installationID)) throw new Error('installationID is invalid');
-  if (!basicUsername) throw new Error('basicUsername is required');
-  if (basicPassword.length < 16 || basicPassword.length > 512) {
-    throw new Error('basicPassword must contain 16 through 512 characters');
-  }
-  if (requestedTargetID && !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(requestedTargetID)) {
-    throw new Error('requestedTargetID is invalid');
-  }
-  if (requestedRemotePort !== null
-      && (!Number.isInteger(requestedRemotePort) || requestedRemotePort < 1 || requestedRemotePort > 65_535)) {
-    throw new Error('requestedRemotePort is invalid');
-  }
-  return {
-    installationID,
-    displayName: cleanText(value.displayName, 'OpenCode machine'),
-    hostname: cleanText(value.hostname, 'unknown-host', 255),
-    platform: cleanText(value.platform, 'unknown', 40).toLowerCase(),
-    clientVersion: cleanText(value.clientVersion, 'unknown', 40),
-    basicUsername,
-    basicPassword,
-    requestedTargetID: requestedTargetID || null,
-    requestedRemotePort,
-  };
-}
-
 function cloneScope(scope) {
   if (!scope || typeof scope !== 'object') throw new Error('pairing scope is required');
   if (typeof scope.targetID !== 'string' || !Array.isArray(scope.targetIDs) || scope.targetIDs.length === 0) {
@@ -144,39 +89,9 @@ function cloneScope(scope) {
   };
 }
 
-function publicMachine(machine) {
-  const {
-    tokenHash: _tokenHash,
-    basicUser: _basicUser,
-    basicPass: _basicPass,
-    ...safe
-  } = machine;
-  return { ...safe, heartbeat: safe.heartbeat ? { ...safe.heartbeat } : null };
-}
-
 function publicDevice(device) {
   const { tokenHash: _tokenHash, ...safe } = device;
   return { ...safe };
-}
-
-function publicAuthorization(authorization) {
-  const { basicUsername: _basicUsername, basicPassword: _basicPassword, ...request } = authorization.request;
-  return {
-    authorizationID: authorization.authorizationID,
-    userCode: authorization.userCode,
-    status: authorization.status,
-    createdAt: new Date(authorization.createdAt).toISOString(),
-    expiresAt: new Date(authorization.expiresAt).toISOString(),
-    ...request,
-  };
-}
-
-function userCode() {
-  let result = '';
-  for (let index = 0; index < 8; index += 1) {
-    result += USER_CODE_ALPHABET[crypto.randomInt(USER_CODE_ALPHABET.length)];
-  }
-  return `${result.slice(0, 4)}-${result.slice(4)}`;
 }
 
 export class PairingStoreError extends Error {
@@ -194,8 +109,6 @@ export class PairingStore {
     webSessionTtlMs = DEFAULT_WEB_SESSION_TTL_MS,
     pairingTtlMs = DEFAULT_PAIRING_TTL_MS,
     ceremonyTtlMs = DEFAULT_CEREMONY_TTL_MS,
-    machineAuthorizationTtlMs = DEFAULT_MACHINE_AUTH_TTL_MS,
-    machinePollIntervalMs = DEFAULT_MACHINE_POLL_INTERVAL_MS,
   }) {
     if (!statePath) throw new Error('PASSKEY_STATE_PATH is required');
     this.statePath = statePath;
@@ -204,13 +117,9 @@ export class PairingStore {
     this.webSessionTtlMs = webSessionTtlMs;
     this.pairingTtlMs = pairingTtlMs;
     this.ceremonyTtlMs = ceremonyTtlMs;
-    this.machineAuthorizationTtlMs = machineAuthorizationTtlMs;
-    this.machinePollIntervalMs = machinePollIntervalMs;
     this.webSessions = new Map();
     this.pairingCodes = new Map();
     this.ceremonies = new Map();
-    this.machineAuthorizations = new Map();
-    this.machineAuthorizationsByUserCode = new Map();
     this.state = this.load();
   }
 
@@ -449,219 +358,6 @@ export class PairingStore {
     return true;
   }
 
-  createMachineAuthorization(request) {
-    this.cleanupEphemeral();
-    const cleaned = cleanMachineRequest(request);
-    const deviceCode = randomToken(32);
-    let code;
-    do code = userCode(); while (this.machineAuthorizationsByUserCode.has(code));
-    const createdAt = this.now();
-    const authorization = {
-      authorizationID: `auth-${randomToken(12)}`,
-      deviceCodeHash: hashToken(deviceCode),
-      userCode: code,
-      status: 'pending',
-      createdAt,
-      expiresAt: createdAt + this.machineAuthorizationTtlMs,
-      intervalMs: this.machinePollIntervalMs,
-      lastPolledAt: null,
-      request: cleaned,
-      response: null,
-    };
-    this.machineAuthorizations.set(authorization.deviceCodeHash, authorization);
-    this.machineAuthorizationsByUserCode.set(code, authorization);
-    return {
-      deviceCode,
-      userCode: code,
-      expiresAt: authorization.expiresAt,
-      intervalMs: authorization.intervalMs,
-      authorizationID: authorization.authorizationID,
-    };
-  }
-
-  listPendingMachineAuthorizations() {
-    this.cleanupEphemeral();
-    return [...this.machineAuthorizations.values()]
-      .filter((authorization) => authorization.status === 'pending')
-      .sort((left, right) => left.createdAt - right.createdAt)
-      .map(publicAuthorization);
-  }
-
-  machineAuthorizationRequest(userCodeValue) {
-    this.cleanupEphemeral();
-    const authorization = this.machineAuthorizationsByUserCode.get(String(userCodeValue || '').toUpperCase());
-    if (!authorization || authorization.status !== 'pending') return null;
-    return { ...authorization.request };
-  }
-
-  approveMachineAuthorization(userCodeValue, assignment) {
-    this.cleanupEphemeral();
-    const code = String(userCodeValue || '').toUpperCase();
-    const authorization = this.machineAuthorizationsByUserCode.get(code);
-    if (!authorization || authorization.status !== 'pending') {
-      throw new PairingStoreError('authorization_not_found', 'Machine authorization was not found or is no longer pending');
-    }
-    if (!assignment || typeof assignment.targetID !== 'string'
-        || !Number.isInteger(assignment.remotePort)
-        || !assignment.transport || typeof assignment.transport !== 'object') {
-      throw new Error('machine assignment is invalid');
-    }
-    const nowIso = new Date(this.now()).toISOString();
-    const accessToken = randomToken(32);
-    const existingIndex = this.state.machines.findIndex(
-      (machine) => machine.installationID === authorization.request.installationID,
-    );
-    const existing = existingIndex >= 0 ? this.state.machines[existingIndex] : null;
-    const displayName = existing?.displayName ?? authorization.request.displayName;
-    const machine = {
-      machineID: existing?.machineID ?? `machine-${crypto.randomBytes(8).toString('hex')}`,
-      installationID: authorization.request.installationID,
-      displayName,
-      displayNameRevision: existing?.displayNameRevision ?? 1,
-      displayNameUpdatedAt: existing?.displayNameUpdatedAt ?? existing?.authorizedAt ?? nowIso,
-      hostname: authorization.request.hostname,
-      platform: authorization.request.platform,
-      clientVersion: authorization.request.clientVersion,
-      targetID: assignment.targetID,
-      displayTargetName: displayName,
-      host: '127.0.0.1',
-      port: assignment.remotePort,
-      basicUser: authorization.request.basicUsername,
-      basicPass: authorization.request.basicPassword,
-      tokenHash: hashToken(accessToken),
-      createdAt: existing?.createdAt ?? nowIso,
-      authorizedAt: nowIso,
-      lastHeartbeatAt: null,
-      heartbeat: null,
-      revokedAt: null,
-    };
-    if (existingIndex >= 0) this.state.machines[existingIndex] = machine;
-    else this.state.machines.push(machine);
-    this.save();
-    authorization.status = 'approved';
-    authorization.response = {
-      accessToken,
-      machine: publicMachine(machine),
-      transport: { ...assignment.transport, remotePort: assignment.remotePort },
-    };
-    return publicMachine(machine);
-  }
-
-  denyMachineAuthorization(userCodeValue) {
-    this.cleanupEphemeral();
-    const authorization = this.machineAuthorizationsByUserCode.get(String(userCodeValue || '').toUpperCase());
-    if (!authorization || authorization.status !== 'pending') return false;
-    authorization.status = 'denied';
-    return true;
-  }
-
-  pollMachineAuthorization(deviceCode) {
-    this.cleanupEphemeral();
-    if (typeof deviceCode !== 'string' || deviceCode.length < 24) {
-      throw new PairingStoreError('invalid_device_code', 'Device code is invalid');
-    }
-    const key = hashToken(deviceCode);
-    const authorization = this.machineAuthorizations.get(key);
-    if (!authorization) throw new PairingStoreError('expired_token', 'Device authorization expired or is invalid');
-    const now = this.now();
-    if (authorization.lastPolledAt !== null && now - authorization.lastPolledAt < authorization.intervalMs) {
-      authorization.intervalMs += 1_000;
-      throw new PairingStoreError('slow_down', 'Polling too quickly');
-    }
-    authorization.lastPolledAt = now;
-    if (authorization.status === 'pending') {
-      throw new PairingStoreError('authorization_pending', 'Waiting for owner approval');
-    }
-    if (authorization.status === 'denied') {
-      this.machineAuthorizations.delete(key);
-      this.machineAuthorizationsByUserCode.delete(authorization.userCode);
-      throw new PairingStoreError('access_denied', 'Machine authorization was denied');
-    }
-    if (authorization.status !== 'approved' || !authorization.response) {
-      throw new PairingStoreError('invalid_grant', 'Machine authorization cannot be completed');
-    }
-    const response = structuredClone(authorization.response);
-    this.machineAuthorizations.delete(key);
-    this.machineAuthorizationsByUserCode.delete(authorization.userCode);
-    return response;
-  }
-
-  authenticateMachine(token) {
-    if (typeof token !== 'string' || token.length === 0) return null;
-    const tokenHash = hashToken(token);
-    const machine = this.state.machines.find((item) => !item.revokedAt && item.tokenHash === tokenHash);
-    return machine ? publicMachine(machine) : null;
-  }
-
-  updateMachineHeartbeat(machineID, heartbeat) {
-    const machine = this.state.machines.find((item) => item.machineID === machineID && !item.revokedAt);
-    if (!machine) return null;
-    const nowIso = new Date(this.now()).toISOString();
-    const lifecycle = ['running', 'stopping', 'stopped'].includes(heartbeat?.lifecycle)
-      ? heartbeat.lifecycle
-      : 'running';
-    machine.lastHeartbeatAt = nowIso;
-    machine.heartbeat = {
-      lifecycle,
-      localHealth: heartbeat?.localHealth === true,
-      opencodeVersion: cleanText(heartbeat?.opencodeVersion, 'unknown', 40),
-      controllerVersion: cleanText(heartbeat?.controllerVersion, 'unknown', 40),
-      lastError: cleanText(heartbeat?.lastError, '', 240) || null,
-      reportedAt: nowIso,
-    };
-    this.save();
-    return publicMachine(machine);
-  }
-
-  listMachines({ includeRevoked = true } = {}) {
-    return this.state.machines
-      .filter((machine) => includeRevoked || !machine.revokedAt)
-      .map(publicMachine);
-  }
-
-  renameMachine(machineID, displayName) {
-    const machine = this.state.machines.find((item) => item.machineID === machineID);
-    if (!machine) return null;
-    const normalized = cleanEditableName(displayName);
-    if (normalized !== machine.displayName || normalized !== machine.displayTargetName) {
-      machine.displayName = normalized;
-      machine.displayTargetName = normalized;
-      machine.displayNameRevision = Number(machine.displayNameRevision || 0) + 1;
-      machine.displayNameUpdatedAt = new Date(this.now()).toISOString();
-      this.save();
-    }
-    return publicMachine(machine);
-  }
-
-  machineTargets() {
-    return this.state.machines
-      .filter((machine) => !machine.revokedAt)
-      .map((machine) => ({
-        machineID: machine.machineID,
-        targetID: machine.targetID,
-        displayName: machine.displayName,
-        host: machine.host,
-        port: machine.port,
-        basicUser: machine.basicUser,
-        basicPass: machine.basicPass,
-      }));
-  }
-
-  managedTargetIDs() {
-    return [...new Set(this.state.machines.map((machine) => machine.targetID))];
-  }
-
-  revokeMachine(machineID) {
-    const machine = this.state.machines.find((item) => item.machineID === machineID);
-    if (!machine || machine.revokedAt) return false;
-    machine.revokedAt = new Date(this.now()).toISOString();
-    machine.tokenHash = null;
-    machine.lastHeartbeatAt = null;
-    machine.heartbeat = null;
-    this.save();
-    return true;
-  }
-
   cleanupEphemeral() {
     const now = this.now();
     for (const [key, expiresAt] of this.webSessions) {
@@ -672,12 +368,6 @@ export class PairingStore {
     }
     for (const [key, pairing] of this.pairingCodes) {
       if (pairing.expiresAt < now) this.pairingCodes.delete(key);
-    }
-    for (const [key, authorization] of this.machineAuthorizations) {
-      if (authorization.expiresAt < now) {
-        this.machineAuthorizations.delete(key);
-        this.machineAuthorizationsByUserCode.delete(authorization.userCode);
-      }
     }
   }
 }

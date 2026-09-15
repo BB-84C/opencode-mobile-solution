@@ -42,22 +42,19 @@ replace with your own.
 
 ## Quick start
 
-1. **Relay** — deploy the service to your host and expose it with a reverse
-   proxy. See [`relay/README.md`](relay/README.md), with a deploy helper in
-   [`relay/deploy/`](relay/deploy) and proxy examples in
-   [`relay/reverse-proxy/`](relay/reverse-proxy).
+1. **Relay** — run the service on the host that owns the backends. See
+   [`relay/README.md`](relay/README.md); proxy examples live in
+   [`relay/reverse-proxy/`](relay/reverse-proxy). Remote access is Tailscale's
+   job, so nothing here is exposed to the public internet.
 2. **App** — set your own identifiers in `app/app.json`, then build and run. See
    [`app/README.md`](app/README.md).
-3. **Local launcher** — install the wrapper so `opencode` attaches to the shared
-   backend. See [`clients/windows/README.md`](clients/windows/README.md) or
-   [`clients/macos/README.md`](clients/macos/README.md).
 
 ## Security notes
 
-- The relay stores only SHA-256 hashes of device and machine credentials. Raw
-  credentials are returned once and never written to disk.
-- `tokens.json`, `passkeys.json`, `machine.json`, `frpc.toml`, and `*.env` hold
-  live secrets. They are git-ignored here; keep them that way.
+- The relay stores only SHA-256 hashes of device credentials. Raw credentials
+  are returned once and never written to disk.
+- `tokens.json`, `passkeys.json`, and `*.env` hold live secrets. They are
+  git-ignored here; keep them that way.
 - Rotate any credential that has ever been committed, printed, or shared.
 - The relay listens only on `127.0.0.1`; TLS is the reverse proxy's job.
 

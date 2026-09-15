@@ -73,7 +73,7 @@ export function proxyRequest({ clientReq, clientRes, target, scope, onOpen, onCl
       clientRes.writeHead(502, { 'Content-Type': 'application/json' });
       clientRes.end(JSON.stringify({
         error: 'upstream_unreachable',
-        message: 'OpenCode server is not reachable. Is the SSH tunnel active?',
+        message: 'OpenCode server is not reachable. Is the backend running on this host?',
       }));
     }
     console.error(`[relay] Proxy error: ${error.message}`);

@@ -3,10 +3,15 @@
  * opencode-relay.mjs — Lightweight token→basic-auth relay for OpenCode server.
  * Zero dependencies (Node 22+ built-ins only).
  *
- * Runs on VPS, listens on port 4097.
- * Mobile clients connect with:  Authorization: Bearer <device-token>
- * Relay translates to:          Authorization: Basic <base64(user:pass)>
- * Forwards to local OpenCode server at:  http://127.0.0.1:4096
+ * Runs on the host machine next to the backends it fronts, listening on 4097.
+ * Remote access is provided by Tailscale; the relay itself never binds a public
+ * interface and never speaks TLS. TLS termination belongs to the tailnet layer.
+ *
+ * Clients connect with:  Authorization: Bearer <device-token>
+ * Relay translates to:   Authorization: Basic <base64(user:pass)>
+ * Forwards to a local OpenCode server, by default http://127.0.0.1:4096.
+ * Several backends may run side by side (one per profile); each is registered
+ * as its own target and selected with the X-OpenCode-Target header.
  *
  * Auth:
  *   - Tokens stored in /etc/opencode-relay/tokens.json
@@ -24,7 +29,6 @@
  */
 
 import http from 'node:http';
-import fs from 'node:fs';
 import path from 'node:path';
 import { authenticateBearer, resolveScope } from './lib/auth.mjs';
 import { startConfigReloader } from './lib/config.mjs';
@@ -40,27 +44,7 @@ const TOKENS_PATH = process.env.TOKENS_PATH || '/etc/opencode-relay/tokens.json'
 const RELOAD_SEC  = parseInt(process.env.TOKEN_RELOAD_SEC || '60', 10);
 const PUBLIC_ORIGIN = process.env.RELAY_PUBLIC_ORIGIN || `http://localhost:${RELAY_PORT}`;
 const PASSKEY_STATE_PATH = process.env.PASSKEY_STATE_PATH || path.join(path.dirname(TOKENS_PATH), 'passkeys.json');
-const FRPS_CONFIG_PATH = process.env.FRPS_CONFIG_PATH || '/etc/frp/frps.toml';
 const activeStreamsByClient = new Map();
-
-function readFrpToken(configPath) {
-    try {
-        const config = fs.readFileSync(configPath, 'utf8');
-        const match = config.match(/^\s*auth\.token\s*=\s*["']([^"']+)["']\s*$/m);
-        return match?.[1] || '';
-    } catch {
-        return '';
-    }
-}
-
-const machineTransport = {
-    frpToken: readFrpToken(FRPS_CONFIG_PATH),
-    frpsHost: process.env.FRP_SERVER_PUBLIC_HOST || '',
-    frpServerPort: parseInt(process.env.FRP_SERVER_PORT || '7000', 10),
-    localForwardPort: parseInt(process.env.FRP_LOCAL_FORWARD_PORT || '17000', 10),
-    remotePortMin: parseInt(process.env.MACHINE_REMOTE_PORT_MIN || '4100', 10),
-    remotePortMax: parseInt(process.env.MACHINE_REMOTE_PORT_MAX || '4199', 10),
-};
 
 function onProxyOpen({ clientID, clientToken, targetID, streaming, close }) {
     if (!streaming) return;
@@ -93,15 +77,6 @@ function closeStreamsForClient(clientID) {
     activeStreamsByClient.delete(clientID);
 }
 
-function closeStreamsForTarget(targetID) {
-    for (const [clientID, active] of activeStreamsByClient) {
-        for (const entry of active) {
-            if (entry.targetID === targetID) entry.close();
-        }
-        if (active.size === 0) activeStreamsByClient.delete(clientID);
-    }
-}
-
 const configReloader = startConfigReloader({
     tokensPath: TOKENS_PATH,
     defaultTarget: { host: OC_HOST, port: OC_PORT },
@@ -112,20 +87,10 @@ const configReloader = startConfigReloader({
 
 let passkeyPairing;
 
+// Targets are declared statically in tokens.json. One entry per backend the
+// host runs; a second backend on another port is just another target.
 function targetRegistry(snapshot = configReloader.getSnapshot()) {
-    const targets = new Map(snapshot.targets);
-    if (!passkeyPairing) return targets;
-    for (const targetID of passkeyPairing.store.managedTargetIDs()) targets.delete(targetID);
-    for (const target of passkeyPairing.store.machineTargets()) {
-        targets.set(target.targetID, {
-            displayName: target.displayName,
-            host: target.host,
-            port: target.port,
-            basicUser: target.basicUser,
-            basicPass: target.basicPass,
-        });
-    }
-    return targets;
+    return new Map(snapshot.targets);
 }
 
 function probeTarget(target, { signal } = {}) {
@@ -147,10 +112,10 @@ function probeTarget(target, { signal } = {}) {
             response.resume();
             response.once('end', () => resolve({ reachable: response.statusCode === 200, statusCode: response.statusCode }));
         });
-        // A short sync burst can transiently saturate the machine's single tunnel,
-        // so a single failed probe must not flip the badge. Two consecutive
-        // failures (see machineStatuses) plus this generous timeout keep short
-        // blips from surfacing as degraded.
+        // A short sync burst can transiently saturate a backend, so a single
+        // failed probe must not flip the badge. The monitor requires two
+        // consecutive failures, and this generous timeout keeps short blips
+        // from surfacing as degraded.
         request.setTimeout(4_000, () => request.destroy(new Error('probe timeout')));
         request.once('error', () => resolve({ reachable: false, statusCode: null }));
         request.end();
@@ -159,50 +124,18 @@ function probeTarget(target, { signal } = {}) {
 
 let machineStatusMonitor;
 
-async function machineStatuses(machines) {
-    return machines.map((machine) => {
-        if (machine.revokedAt) {
-            return {
-                ...machine,
-                state: 'revoked',
-                heartbeatFresh: false,
-                localHealthy: false,
-                ...machineStatusMonitor.getStatus(machine.targetID),
-            };
-        }
-        const relayStatus = machineStatusMonitor.getStatus(machine.targetID);
-        const heartbeatTime = Date.parse(machine.lastHeartbeatAt || '');
-        const heartbeatFresh = Number.isFinite(heartbeatTime) && Date.now() - heartbeatTime <= 90_000;
-        const localHealthy = heartbeatFresh && machine.heartbeat?.localHealth === true;
-        const state = machine.heartbeat?.lifecycle === 'stopped'
-            ? 'stopped'
-            : heartbeatFresh && localHealthy && relayStatus.publicReachable === true
-                ? 'online'
-                : heartbeatFresh || relayStatus.publicReachable === true
-                    ? 'degraded'
-                    : 'offline';
-        return {
-            ...machine,
-            state,
-            heartbeatFresh,
-            localHealthy,
-            ...relayStatus,
-        };
-    });
-}
-
 passkeyPairing = createPasskeyPairing({
     publicOrigin: PUBLIC_ORIGIN,
     statePath: PASSKEY_STATE_PATH,
     bootstrapToken: process.env.PASSKEY_BOOTSTRAP_TOKEN,
     pairingSourceClientID: process.env.PAIRING_SOURCE_CLIENT_ID,
     getSnapshot: configReloader.getSnapshot,
-    machineTransport,
-    getMachineStatuses: machineStatuses,
     onDeviceRevoked: closeStreamsForClient,
-    onMachineRevoked: (machine) => closeStreamsForTarget(machine.targetID),
 });
 
+// Health of every declared target is sampled continuously. Nothing consumes the
+// cache yet; exposing it on /relay/targets so a client can tell which backend is
+// alive belongs to the multi-backend work, not to this cleanup.
 machineStatusMonitor = createMachineStatusMonitor({
     getTargets: targetRegistry,
     probeTarget,

@@ -31,11 +31,10 @@ This relay gives each paired phone its own credential. The QR code is single-use
 
 ## Quick Start
 
-### 1. Deploy the package
+### 1. Copy the package to the host
 
-```bash
-RELAY_SSH_ALIAS=your-vps ./deploy/deploy-relay.sh
-```
+The relay runs on the same machine as the backends it fronts. Copy `relay/` to
+the host; there is no remote deployment step and no VPS.
 
 ### 2. Install
 
@@ -187,47 +186,6 @@ Open `https://opencode.example.com/#setup=<bootstrap-secret>` once and create th
 
 The manual Bearer/Basic form remains an advanced recovery path in the app; it is not needed for normal pairing.
 
-### 8. Authorize and monitor machines
-
-`opencode --relay_server start` and `restart` use an OAuth device-authorization flow.
-The CLI sends machine metadata and its local OpenCode Basic credential over TLS, receives a
-short-lived device code, and opens `verification_uri_complete` in the user's normal browser.
-The owner signs in with a passkey and explicitly approves the request in the Dashboard.
-
-The token endpoint returns a revocable machine bearer and FRP transport configuration once.
-Only a SHA-256 hash of the bearer is stored in `passkeys.json`; the CLI stores the original in
-`~/.config/opencode-relay/machine.json` with mode `0600`. Authorization remains valid until the
-owner revokes the machine. A revoked target is removed from phone discovery immediately and
-does not fall back to an identically named legacy static target.
-
-The Dashboard always shows three explicit sections:
-
-- pending machine authorization requests, with Approve and Deny actions;
-- machines, including local 4096 health, fresh heartbeat, VPS reachability, target and port;
-- authorized phones, including paired/last-used time and a Revoke action.
-
-Machine states are `online`, `degraded`, `offline`, `stopped`, or `revoked`. The relay decides them from
-both the outbound machine heartbeat and an authenticated VPS-side probe, so a local server
-cannot be mistaken for a working public connection. The probe has a 4 s timeout, and a
-machine must fail two consecutive probes before it can flip from `online` to `degraded`, so a
-sub-minute data-plane blip (for example a client sync burst through the frp tunnel) does not
-flicker the dashboard. Recovery back to `online` is immediate on the first successful probe.
-
-The public machine endpoints are:
-
-| Endpoint | Authentication | Purpose |
-|----------|----------------|---------|
-| `POST /api/oauth/device/code` | rate limited | Start a ten-minute authorization request |
-| `POST /api/oauth/token` | one-time device code | Poll for owner approval and retrieve credentials once |
-| `GET /api/machine/me` | machine bearer | Validate the persistent machine credential |
-| `DELETE /api/machine/me` | machine bearer | Revoke the calling machine before a local credential purge |
-| `POST /api/machine/heartbeat` | machine bearer | Report local 4096 health and versions |
-
-Approve, deny, list, and administrative revoke operations require a same-origin
-passkey web session. A machine may revoke only its own credential through the
-authenticated DELETE endpoint.
-
----
 
 ## Environment Variables
 
@@ -242,10 +200,6 @@ authenticated DELETE endpoint.
 | `PASSKEY_STATE_PATH` | Beside `TOKENS_PATH` | Persistent passkey and paired-device state file |
 | `PASSKEY_BOOTSTRAP_TOKEN` | None | Private first-registration secret; ignored after the first passkey exists |
 | `PAIRING_SOURCE_CLIENT_ID` | First configured client | Static client whose target and directory scope new phones inherit |
-| `FRPS_CONFIG_PATH` | `/etc/frp/frps.toml` | Protected FRP server configuration used to provision approved machines |
-| `FRP_SERVER_PUBLIC_HOST` | None | Public frps hostname/IP issued to newly enrolled machines so `frpc` can dial the server directly instead of through an SSH local forward; empty keeps the legacy two-layer transport |
-| `MACHINE_REMOTE_PORT_MIN` | `4100` | First dynamically allocated machine port |
-| `MACHINE_REMOTE_PORT_MAX` | `4199` | Last dynamically allocated machine port |
 ---
 
 ## Architecture

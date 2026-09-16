@@ -189,6 +189,14 @@ if [ -r "$TOKENS_PATH" ]; then
 fi
 [ -n "$CLIENT_TOKEN" ] || CLIENT_TOKEN="$(random_hex 32)"
 
+# The relay requires at least 24 characters and stops accepting this the moment
+# an owner passkey exists, so it is a one-time key rather than a standing secret.
+BOOTSTRAP_TOKEN=""
+if [ -r "$RELAY_ENV_PATH" ]; then
+  BOOTSTRAP_TOKEN="$(sed -n 's/^PASSKEY_BOOTSTRAP_TOKEN=//p' "$RELAY_ENV_PATH" | head -1)"
+fi
+[ -n "$BOOTSTRAP_TOKEN" ] || BOOTSTRAP_TOKEN="$(random_hex 32)"
+
 TOKENS_JSON="$(
   BASIC_USER="$BASIC_USER" BASIC_PASS="$BASIC_PASS" CLIENT_TOKEN="$CLIENT_TOKEN" \
   TARGET_SPEC="${TARGETS+$(IFS=' '; printf '%s' "${TARGETS[*]}")}" \
@@ -244,6 +252,7 @@ TOKENS_PATH=$TOKENS_PATH
 PASSKEY_STATE_PATH=$STATE_DIR/passkeys.json
 RELAY_PUBLIC_ORIGIN=$PUBLIC_ORIGIN
 PAIRING_SOURCE_CLIENT_ID=owner
+PASSKEY_BOOTSTRAP_TOKEN=$BOOTSTRAP_TOKEN
 TOKEN_RELOAD_SEC=60
 EOF
 )"
@@ -419,5 +428,11 @@ log ""
 log "  URL for clients : $PUBLIC_ORIGIN"
 log "  device token    : stored in $TOKENS_PATH (client id 'owner')"
 log "  pairing console : $PUBLIC_ORIGIN/pair"
+log ""
+log "  Register the owner passkey once, from a browser on this tailnet:"
+log "    $PUBLIC_ORIGIN/#setup=$BOOTSTRAP_TOKEN"
+log "  The secret is in the URL fragment, so it is never sent to the server or"
+log "  written to an access log. The link stops working once a passkey exists,"
+log "  and pairing a phone or laptop by QR needs that passkey first."
 log ""
 log "done."

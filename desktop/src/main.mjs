@@ -188,8 +188,44 @@ async function runSmoke(window, outputDir) {
     await fs.writeFile(path.join(outputDir, "chrome-geometry.json"), JSON.stringify(geometry, null, 2));
     process.stdout.write(`smoke: topmost text "${geometry.sample}" at y=${geometry.textTop} (body padding ${geometry.bodyPaddingTop})\n`);
     process.stdout.write(`smoke: body children ${JSON.stringify(geometry.roots)}\n`);
-    if (process.platform === "darwin" && (geometry.textTop === null || geometry.textTop < 20)) {
-      failures.push(`content sits under the traffic lights (topmost text at y=${geometry.textTop})`);
+    if (geometry.textTop === null) {
+      failures.push("the page rendered no visible text");
+    } else if (process.platform === "darwin") {
+      // The buttons float over the page, so the first row has to clear them.
+      if (geometry.textTop < 20) {
+        failures.push(`content sits under the traffic lights (topmost text at y=${geometry.textTop})`);
+      }
+    } else if (geometry.textTop >= 20) {
+      // Everywhere else the OS draws a real title bar above the page. Reserving
+      // the strip anyway is the same bug mirrored: a band of dead margin at the
+      // top of every window, which nothing would otherwise report.
+      failures.push(
+        `content starts at y=${geometry.textTop} on ${process.platform}, which means the macOS titlebar inset leaked onto a platform with a real title bar`,
+      );
+    }
+
+    // First paint is not the finished screen. Anything that needs the network —
+    // the machine list, the session list — is still in flight at this point, and
+    // judging the app by the earlier capture reports a spinner as a failure.
+    await new Promise((done) => setTimeout(done, 8_000));
+    const settled = await window.webContents.executeJavaScript("document.body.innerText");
+    await fs.writeFile(path.join(outputDir, "body-settled.txt"), settled ?? "");
+    process.stdout.write(`smoke: settled text ${JSON.stringify((settled ?? "").slice(0, 160))}\n`);
+
+    // Ask the renderer itself to reach the relay. Doing it from a shell proves
+    // the server answers; doing it from here proves the app's own origin, TLS
+    // trust and proxy settings let it through, which is the half a curl cannot
+    // separate when the window shows an empty list.
+    if (process.env.COCKPIT_SMOKE_FETCH) {
+      const headers = process.env.COCKPIT_SMOKE_FETCH_TOKEN
+        ? { Authorization: `Bearer ${process.env.COCKPIT_SMOKE_FETCH_TOKEN}` }
+        : {};
+      const reach = await window.webContents.executeJavaScript(
+        `fetch(${JSON.stringify(process.env.COCKPIT_SMOKE_FETCH)}, { headers: ${JSON.stringify(headers)} })
+           .then(async (r) => ({ status: r.status, body: (await r.text()).slice(0, 120) }))
+           .catch((e) => ({ status: "threw", body: String(e) }))`,
+      );
+      process.stdout.write(`smoke: renderer fetch -> ${reach.status} ${JSON.stringify(reach.body)}\n`);
     }
 
     const errors = await window.webContents.executeJavaScript("window.__cockpitErrors ?? []");

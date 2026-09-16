@@ -70,8 +70,20 @@ function securityHeaders(contentType) {
   };
 }
 
+// A wildcard origin cannot be combined with credentials by any browser, so this
+// opens the API to bearer-authenticated clients without exposing the console's
+// cookie session to another origin.
+const CROSS_ORIGIN_JSON = {
+  'Access-Control-Allow-Origin': '*',
+  'Cross-Origin-Resource-Policy': 'cross-origin',
+};
+
 function sendJson(res, status, value, headers = {}) {
-  res.writeHead(status, { ...securityHeaders('application/json; charset=utf-8'), ...headers });
+  res.writeHead(status, {
+    ...securityHeaders('application/json; charset=utf-8'),
+    ...CROSS_ORIGIN_JSON,
+    ...headers,
+  });
   res.end(JSON.stringify(value));
 }
 
@@ -820,11 +832,14 @@ export function createPasskeyPairing({
         await createPairing(req, res);
         return true;
       }
-      if (route === 'OPTIONS /api/pairing/exchange') {
+      // An Authorization header is not CORS-safelisted, so even a GET is
+      // preflighted. Covering one route left every other API call unreachable
+      // from a client the relay does not itself serve.
+      if (req.method === 'OPTIONS' && url.pathname.startsWith('/api/')) {
         res.writeHead(204, {
           'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'POST,OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type',
+          'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
+          'Access-Control-Allow-Headers': 'Authorization,Content-Type',
           'Access-Control-Max-Age': '86400',
         });
         res.end();

@@ -5,6 +5,7 @@ import {
   verifyRegistrationResponse,
 } from '@simplewebauthn/server';
 import QRCode from 'qrcode';
+import { preflightHeaders } from './cors.mjs';
 
 import { PairingStore, PairingStoreError } from './pairing-store.mjs';
 
@@ -836,12 +837,9 @@ export function createPasskeyPairing({
       // preflighted. Covering one route left every other API call unreachable
       // from a client the relay does not itself serve.
       if (req.method === 'OPTIONS' && url.pathname.startsWith('/api/')) {
-        res.writeHead(204, {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
-          'Access-Control-Allow-Headers': 'Authorization,Content-Type',
-          'Access-Control-Max-Age': '86400',
-        });
+        // This runs before the proxy's own preflight, so it has to answer with
+        // the same policy or it silently narrows it for every API route.
+        res.writeHead(204, preflightHeaders());
         res.end();
         return true;
       }

@@ -26,6 +26,32 @@ const target = (over: Partial<RelayTargetState> = {}): RelayTargetState => ({
 });
 
 describe('device selection model', () => {
+  it('reports why the machine list is empty instead of blaming permissions', () => {
+    // The screen used to say the relay authorized nothing whenever the list was
+    // empty. The real cause was a blocked request whose message nobody saw, and
+    // the wrong explanation sent the search toward relay permissions for hours.
+    const model = buildDeviceSelectionModel({
+      connections: [host()],
+      relayTargets: {},
+      syncErrors: { office: 'Failed to fetch' },
+    });
+
+    const [choice] = model.groups[0].choices;
+    expect(choice.targetName).toBe('Machine list unavailable');
+    expect(choice.blockedReason).toBe('Failed to fetch');
+  });
+
+  it('still says nothing is authorized when the refresh succeeded and found none', () => {
+    const model = buildDeviceSelectionModel({
+      connections: [host()],
+      relayTargets: {},
+      syncErrors: { office: null },
+    });
+
+    expect(model.groups[0].choices[0].blockedReason)
+      .toBe('This relay authorized no machine for this device');
+  });
+
   it('says nothing is paired rather than showing an empty screen', () => {
     const model = buildDeviceSelectionModel({ connections: [], relayTargets: {} });
 

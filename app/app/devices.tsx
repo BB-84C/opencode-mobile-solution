@@ -18,8 +18,9 @@ export default function DevicesScreen() {
     () => buildDeviceSelectionModel({
       connections: store.connections,
       relayTargets: store.relayTargets,
+      syncErrors: store.hostSyncErrors,
     }),
-    [store.connections, store.relayTargets],
+    [store.connections, store.relayTargets, store.hostSyncErrors],
   );
 
   // This screen only reads the machine list; something has to go and ask for it.

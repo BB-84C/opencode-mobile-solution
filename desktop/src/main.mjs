@@ -159,10 +159,15 @@ async function runSmoke(window, outputDir) {
     // the chain from keymap through IPC, routing and the store is only tested
     // by something the user could have seen.
     if (process.env.COCKPIT_SMOKE_KEY) {
-      const [key, ...modifiers] = process.env.COCKPIT_SMOKE_KEY.split("+").reverse();
       window.webContents.focus();
-      window.webContents.sendInputEvent({ type: "keyDown", keyCode: key, modifiers });
-      window.webContents.sendInputEvent({ type: "keyUp", keyCode: key, modifiers });
+      // A comma separates chords in a sequence, so a leader binding such as
+      // "ctrl+x,n" can be exercised the way a user actually types it.
+      for (const chord of process.env.COCKPIT_SMOKE_KEY.split(",")) {
+        const [key, ...modifiers] = chord.trim().split("+").reverse();
+        window.webContents.sendInputEvent({ type: "keyDown", keyCode: key, modifiers });
+        window.webContents.sendInputEvent({ type: "keyUp", keyCode: key, modifiers });
+        await new Promise((done) => setTimeout(done, 250));
+      }
       await new Promise((done) => setTimeout(done, 1_200));
 
       const afterKey = await window.webContents.executeJavaScript("document.body.innerText");

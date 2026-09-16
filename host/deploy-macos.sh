@@ -224,6 +224,11 @@ TOKENS_JSON="$(
           token: process.env.CLIENT_TOKEN,
           targetID: ids[0],
           targetIDs: ids,
+          // null means any directory. Omitting the field is not the same: the
+          // relay normalises a missing value to an empty list, which forbids
+          // every directory and makes each scoped request fail with
+          // directory_forbidden long after the deployment looked healthy.
+          allowedDirectories: null,
         },
       },
     }, null, 2) + "\n");
@@ -401,7 +406,15 @@ auth_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
   -H "Authorization: Bearer $CLIENT_TOKEN" "$PUBLIC_ORIGIN/session")"
 [ "$auth_code" = "200" ] || die "an authenticated request returned $auth_code, expected 200"
 
-log "verified: health ok, unauthenticated 401, authenticated 200"
+# An unscoped request passes even when every directory is forbidden, which is how
+# a deployment can look healthy and then fail on the first real call. Ask for one
+# explicitly.
+scoped_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+  -H "Authorization: Bearer $CLIENT_TOKEN" \
+  --get --data-urlencode "directory=$HOME" "$PUBLIC_ORIGIN/session")"
+[ "$scoped_code" = "200" ] || die "a directory-scoped request returned $scoped_code; the owner client cannot reach any directory"
+
+log "verified: health ok, unauthenticated 401, authenticated 200, directory-scoped 200"
 log ""
 log "  URL for clients : $PUBLIC_ORIGIN"
 log "  device token    : stored in $TOKENS_PATH (client id 'owner')"

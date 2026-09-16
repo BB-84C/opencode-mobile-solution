@@ -9,7 +9,9 @@ const mocks = vi.hoisted(() => {
   const state = {
     connections: [] as any[],
     relayTargets: {} as Record<string, any[]>,
+    activeConnectionId: null as string | null,
     setActiveConnection: vi.fn(() => true),
+    refreshActiveHost: vi.fn(async () => undefined),
   };
   return { push: vi.fn(), state };
 });
@@ -63,11 +65,34 @@ const textOf = (tree: ReactTestRenderer) =>
 beforeEach(() => {
   mocks.push.mockClear();
   mocks.state.setActiveConnection.mockClear();
+  mocks.state.refreshActiveHost.mockClear();
   mocks.state.connections = [];
   mocks.state.relayTargets = {};
+  mocks.state.activeConnectionId = null;
 });
 
 describe('DevicesScreen route', () => {
+  it('asks the relay for its machines when nothing is cached yet', async () => {
+    // The screen only reads the list. On a cold start nothing has fetched it, so
+    // without this it reports "no machine authorized" for a healthy relay.
+    mocks.state.connections = [host('office', 'Office Mac')];
+    mocks.state.relayTargets = {};
+
+    await act(async () => { create(<DevicesScreen />); });
+
+    expect(mocks.state.setActiveConnection).toHaveBeenCalledWith('office');
+    expect(mocks.state.refreshActiveHost).toHaveBeenCalled();
+  });
+
+  it('does not re-ask once the machines are known', async () => {
+    mocks.state.connections = [host('office', 'Office Mac')];
+    mocks.state.relayTargets = { office: [machine('default')] };
+
+    await act(async () => { create(<DevicesScreen />); });
+
+    expect(mocks.state.refreshActiveHost).not.toHaveBeenCalled();
+  });
+
   it('lists every machine under the host it belongs to', () => {
     mocks.state.connections = [host('office', 'Office Mac'), host('spare', 'Spare')];
     mocks.state.relayTargets = { office: [machine('default'), machine('gpt')], spare: [machine('local')] };

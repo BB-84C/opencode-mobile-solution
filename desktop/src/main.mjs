@@ -161,14 +161,35 @@ async function runSmoke(window, outputDir) {
     const text = await window.webContents.executeJavaScript("document.body.innerText");
     await fs.writeFile(path.join(outputDir, "body.txt"), text ?? "");
 
-    // The shell reserves a strip for the traffic lights by injecting CSS; an
-    // injection that silently failed would leave the header underneath them.
-    const inset = await window.webContents.executeJavaScript(
-      "getComputedStyle(document.body).paddingTop",
-    );
-    process.stdout.write(`smoke: body padding-top ${inset}\n`);
-    if (process.platform === "darwin" && parseFloat(inset) < 20) {
-      failures.push(`titlebar inset did not apply (padding-top ${inset})`);
+    // The traffic lights float over the page on macOS, so the app's first row has
+    // to start below them. Measure where the topmost visible text actually
+    // landed. A computed padding only proves the CSS parsed; a root element that
+    // fills the window by absolute positioning ignores it, and the header still
+    // renders under the buttons.
+    const geometry = await window.webContents.executeJavaScript(`(() => {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let top = Infinity, sample = "";
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (!node.nodeValue || !node.nodeValue.trim()) continue;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const rect = range.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) continue;
+        if (rect.top < top) { top = rect.top; sample = node.nodeValue.trim().slice(0, 40); }
+      }
+      const roots = Array.from(document.body.children).map((el) => {
+        const s = getComputedStyle(el);
+        return { tag: el.tagName, id: el.id, position: s.position, top: s.top, height: s.height };
+      });
+      return { textTop: Number.isFinite(top) ? top : null, sample,
+               bodyPaddingTop: getComputedStyle(document.body).paddingTop, roots };
+    })()`);
+    await fs.writeFile(path.join(outputDir, "chrome-geometry.json"), JSON.stringify(geometry, null, 2));
+    process.stdout.write(`smoke: topmost text "${geometry.sample}" at y=${geometry.textTop} (body padding ${geometry.bodyPaddingTop})\n`);
+    process.stdout.write(`smoke: body children ${JSON.stringify(geometry.roots)}\n`);
+    if (process.platform === "darwin" && (geometry.textTop === null || geometry.textTop < 20)) {
+      failures.push(`content sits under the traffic lights (topmost text at y=${geometry.textTop})`);
     }
 
     const errors = await window.webContents.executeJavaScript("window.__cockpitErrors ?? []");

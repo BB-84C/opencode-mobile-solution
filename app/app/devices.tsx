@@ -1,5 +1,5 @@
 import { router } from 'expo-router';
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -22,6 +22,23 @@ export default function DevicesScreen() {
     [store.connections, store.relayTargets],
   );
 
+  // This screen only reads the machine list; something has to go and ask for it.
+  // On a cold start nothing has, so without this the first screen reports "no
+  // machine authorized" for a relay that is perfectly willing to answer.
+  const asked = useRef(new Set<string>());
+  const [discovering, setDiscovering] = useState(false);
+  useEffect(() => {
+    const connections = store.connections;
+    if (connections.length === 0) return;
+    const activeId = store.activeConnectionId ?? connections[0].id;
+    if (!store.activeConnectionId) store.setActiveConnection(activeId);
+    if ((store.relayTargets[activeId] ?? []).length > 0) return;
+    if (asked.current.has(activeId)) return;
+    asked.current.add(activeId);
+    setDiscovering(true);
+    void store.refreshActiveHost().finally(() => setDiscovering(false));
+  }, [store.connections, store.relayTargets, store.activeConnectionId]);
+
   const open = (choice: DeviceChoice) => {
     if (!isDeviceChoiceSelectable(choice)) return;
     store.setActiveConnection(choice.hostId);
@@ -43,6 +60,8 @@ export default function DevicesScreen() {
           <Text style={styles.subtitle}>
             {`${model.reachableChoices} of ${model.totalChoices} reachable`}
           </Text>
+        ) : discovering ? (
+          <Text testID="devices-discovering" style={styles.subtitle}>Asking the relay which machines it has…</Text>
         ) : null}
       </View>
 

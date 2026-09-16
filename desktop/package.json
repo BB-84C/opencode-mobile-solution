@@ -9,9 +9,11 @@
     "build:renderer": "node scripts/build-renderer.mjs",
     "start": "electron .",
     "dev": "npm run build:renderer && electron .",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "package": "node scripts/package.mjs"
   },
   "devDependencies": {
+    "@electron/packager": "^20.3.0",
     "electron": "^44.3.0"
   }
 }

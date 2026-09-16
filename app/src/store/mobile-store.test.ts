@@ -679,6 +679,60 @@ describe('mobile store composite relay contract', () => {
     expect(failureCalls).toHaveLength(1);
   });
 
+  it('learns a machine\'s agents and models without a session existing there', async () => {
+    // A fresh install has no session anywhere, so the contract cache is empty and
+    // the new-session form would have nothing to offer.
+    const respond = (url: string) => {
+      if (url.includes('/agent')) return [{ name: 'build' }, { name: 'plan' }];
+      if (url.includes('/config/providers')) {
+        return {
+          providers: [{
+            id: 'anthropic',
+            name: 'Anthropic',
+            models: { 'claude-opus-5': { id: 'claude-opus-5', providerID: 'anthropic', name: 'Claude Opus 5' } },
+          }],
+          default: { anthropic: 'claude-opus-5' },
+        };
+      }
+      if (url.includes('/command')) return [];
+      return {};
+    };
+    const fetchMock = vi.fn(async (input: unknown) => new Response(JSON.stringify(respond(String(input))), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { useOpenCodeMobileStore, executionScopeKey } = await import('./mobile-store');
+    useOpenCodeMobileStore.setState({ connections: [host], machineContracts: {} });
+
+    const loaded = await useOpenCodeMobileStore.getState().loadMachineContract({
+      connectionId: host.id,
+      relayTargetID: 'mac',
+      directory: '/repo',
+    });
+
+    expect(loaded).toBe(true);
+    const key = executionScopeKey({ connectionId: host.id, relayTargetID: 'mac' }, '/repo');
+    const contract = useOpenCodeMobileStore.getState().machineContracts[key];
+    expect(contract?.agents.map((agent) => agent.name)).toContain('build');
+    expect(contract?.providers.length).toBeGreaterThan(0);
+  });
+
+  it('reports failure rather than caching a contract a machine could not supply', async () => {
+    const fetchMock = vi.fn(async () => new Response('nope', { status: 500 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { useOpenCodeMobileStore } = await import('./mobile-store');
+    useOpenCodeMobileStore.setState({ connections: [host], machineContracts: {} });
+
+    const loaded = await useOpenCodeMobileStore.getState().loadMachineContract({
+      connectionId: host.id,
+      relayTargetID: 'mac',
+    });
+
+    expect(loaded).toBe(false);
+    expect(useOpenCodeMobileStore.getState().machineContracts).toEqual({});
+  });
+
   it('creates a session on the chosen machine and puts it at the top of the list', async () => {
     const created = { id: 'ses_new', title: 'New Session', directory: '/repo', time: { created: 2, updated: 2 } };
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(created), {

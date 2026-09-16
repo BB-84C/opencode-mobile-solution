@@ -1,5 +1,5 @@
 import { useFonts } from 'expo-font';
-import { DarkTheme, Stack, ThemeProvider } from 'expo-router';
+import { DarkTheme, router, Stack, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import { AppState } from 'react-native';
@@ -9,7 +9,7 @@ import { useColorScheme } from '@/components/useColorScheme';
 import { palette } from '@/src/ui/palette';
 import { flushMobileSessionPersistence, useOpenCodeMobileStore } from '@/src/store/mobile-store';
 import { settingsModalOptions } from '@/src/ux/settings-navigation';
-import { useDesktopShell } from '@/src/ux/use-desktop-shell';
+import { useDesktopShell, useScreenActions } from '@/src/ux/use-desktop-shell';
 
 export {
   // Catch any errors thrown by the Layout component.
@@ -50,6 +50,11 @@ export default function RootLayout() {
 function RootLayoutNav() {
   useColorScheme();
   useDesktopShell();
+  // Claimed at the root so the key works from any surface; a screen-level claim
+  // would make it dead everywhere except that screen.
+  useScreenActions({
+    'new-session': () => { router.push('/new-session'); },
+  });
   const hydrate = useOpenCodeMobileStore((state) => state.hydrate);
   useEffect(() => {
     void hydrate();

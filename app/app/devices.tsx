@@ -4,7 +4,6 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useOpenCodeMobileStore } from '@/src/store/mobile-store';
-import { useScreenActions } from '@/src/ux/use-desktop-shell';
 import { palette } from '@/src/ui/palette';
 import {
   buildDeviceSelectionModel,
@@ -22,10 +21,6 @@ export default function DevicesScreen() {
     }),
     [store.connections, store.relayTargets],
   );
-
-  useScreenActions({
-    'new-session': () => { router.push('/new-session'); },
-  });
 
   const open = (choice: DeviceChoice) => {
     if (!isDeviceChoiceSelectable(choice)) return;

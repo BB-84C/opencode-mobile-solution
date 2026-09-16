@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => {
     machineContracts: {} as Record<string, any>,
     error: null as string | null,
     createSession: vi.fn(),
+    loadMachineContract: vi.fn(async () => false),
     setSessionAgent: vi.fn(),
     setSessionModel: vi.fn(),
   };
@@ -91,6 +92,7 @@ beforeEach(() => {
   mocks.state.machineContracts = {};
   mocks.state.error = null;
   mocks.state.createSession = vi.fn(async () => ({ connectionId: 'office', relayTargetID: 'mac', sessionId: 'ses_new' }));
+  mocks.state.loadMachineContract = vi.fn(async () => false);
   mocks.state.setSessionAgent = vi.fn();
   mocks.state.setSessionModel = vi.fn();
 });
@@ -150,12 +152,23 @@ describe('NewSessionScreen route', () => {
     expect(String(tree.root.findByProps({ testID: 'new-session-error' }).props.children)).toContain('relay said no');
   });
 
-  it('says the machine has not reported its agents rather than showing an empty list', async () => {
+  it('asks the machine what it can run when nothing is cached yet', async () => {
+    // On a fresh install no session has ever cached a contract, so without this
+    // the agent and model lists would stay empty forever.
+    const tree = render();
+    await press(tree, 'new-session-machine-mac');
+
+    expect(mocks.state.loadMachineContract).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionId: 'office', relayTargetID: 'mac' }),
+    );
+  });
+
+  it('says the machine reported nothing rather than showing an empty list', async () => {
     const tree = render();
     await press(tree, 'new-session-machine-mac');
 
     expect(
       String(tree.root.findByProps({ testID: 'new-session-agents-unavailable' }).props.children),
-    ).toContain('has not reported its agents');
+    ).toMatch(/did not report any agents|Asking this machine/);
   });
 });

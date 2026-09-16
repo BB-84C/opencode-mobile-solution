@@ -1,5 +1,5 @@
 import { router } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -20,6 +20,7 @@ export default function NewSessionScreen() {
   const [agentName, setAgentName] = useState<string | undefined>();
   const [modelKey, setModelKey] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
+  const [loadingContract, setLoadingContract] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const machines = useMemo(
@@ -39,6 +40,21 @@ export default function NewSessionScreen() {
     );
     return buildSessionCreationOptions(store.machineContracts[key]);
   }, [machine, directory, store.machineContracts]);
+
+  // On a fresh install nothing has cached a contract, so the agent and model
+  // lists would stay empty forever. Fetching them is not a session operation, so
+  // ask the machine directly once one is chosen.
+  useEffect(() => {
+    if (!machine || !options.contractMissing) return;
+    let cancelled = false;
+    setLoadingContract(true);
+    void store.loadMachineContract({
+      connectionId: machine.connectionId,
+      relayTargetID: machine.targetId,
+      directory: directory.trim() || undefined,
+    }).finally(() => { if (!cancelled) setLoadingContract(false); });
+    return () => { cancelled = true; };
+  }, [machine?.connectionId, machine?.targetId, directory, options.contractMissing]);
 
   const create = async () => {
     const validation = validateSessionCreation({ machine, directory, agentName, modelKey }, options);
@@ -103,9 +119,11 @@ export default function NewSessionScreen() {
         <Text style={styles.label}>Agent</Text>
         {options.contractMissing ? (
           <Text testID="new-session-agents-unavailable" style={styles.muted}>
-            {machine
-              ? 'This machine has not reported its agents yet. The session will start on its defaults.'
-              : 'Choose a machine to see its agents.'}
+            {!machine
+              ? 'Choose a machine to see its agents.'
+              : loadingContract
+                ? 'Asking this machine what it can run…'
+                : 'This machine did not report any agents. The session will start on its defaults.'}
           </Text>
         ) : (
           options.agents.map((agent) => (

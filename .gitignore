@@ -33,3 +33,6 @@ app/expo-env.d.ts
 # os cruft
 .DS_Store
 Thumbs.db
+
+# tooling index, not part of the project
+.codegraph

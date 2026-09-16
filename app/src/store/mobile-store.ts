@@ -187,6 +187,13 @@ export interface MobileStore {
     directory?: string;
     title?: string;
   }): Promise<SessionRef | null>;
+  /** Fetches a machine's agents and providers without needing a session there,
+   *  so a new-session form has real lists on a fresh install. */
+  loadMachineContract(input: {
+    connectionId: string;
+    relayTargetID?: string;
+    directory?: string;
+  }): Promise<boolean>;
   sendPrompt(text: string): Promise<string | null>;
   /** Removes legacy records; it never dispatches them. */
   flushQueuedPrompts(connectionId?: string): Promise<void>;
@@ -831,6 +838,35 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
     // Creation itself lives in createSession; this only clears a stale banner so
     // the screen that offers the choices opens on a clean slate.
     set({ error: null });
+  },
+
+  async loadMachineContract({ connectionId, relayTargetID, directory }) {
+    const connection = get().connections.find((item) => item.id === connectionId);
+    if (!connection) return false;
+    const client = clientFor(connection, relayTargetID);
+    const query = directory ? { directory } : {};
+    const [agentsResult, providersResult, configResult, commandsResult] = await Promise.allSettled([
+      client.listAgents(query),
+      client.listConfiguredProviders ? client.listConfiguredProviders(query) : Promise.resolve(undefined),
+      client.getConfig ? client.getConfig(query) : Promise.resolve(undefined),
+      client.listCommands(query),
+    ]);
+    if (agentsResult.status !== 'fulfilled' || providersResult.status !== 'fulfilled') return false;
+
+    const ref: SessionRef = { connectionId, relayTargetID: relayTargetID ?? '', sessionId: '' };
+    const contract = buildMachineContract({
+      ref,
+      session: { id: '', directory } as Session,
+      agents: agentsResult.value,
+      providers: providersResult.value,
+      config: fulfilledOr(configResult, undefined),
+      commands: fulfilledOr(commandsResult, []),
+    });
+    if (!contract) return false;
+
+    const scopeKey = executionScopeKey(ref, directory);
+    set((state) => ({ machineContracts: { ...state.machineContracts, [scopeKey]: contract } }));
+    return true;
   },
 
   async createSession({ connectionId, relayTargetID, directory, title }) {

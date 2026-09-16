@@ -92,6 +92,18 @@ function createWindow() {
     },
   });
 
+  // The traffic lights float over the page on a hiddenInset title bar, so the
+  // first row of content sits underneath them. Reserve the strip in the shell
+  // rather than in the shared UI, which the phone also renders and where this
+  // space would be dead margin.
+  if (process.platform === "darwin") {
+    window.webContents.on("dom-ready", () => {
+      void window.webContents.insertCSS(
+        "body{padding-top:env(titlebar-area-height,28px)!important;box-sizing:border-box}",
+      );
+    });
+  }
+
   // A terminal owns every key; a window does not. Tab moves focus, ctrl+w
   // closes the window, ctrl+p prints. Deciding here rather than in the page
   // means the default action never runs, which is the whole point.
@@ -150,6 +162,16 @@ async function runSmoke(window, outputDir) {
 
     const text = await window.webContents.executeJavaScript("document.body.innerText");
     await fs.writeFile(path.join(outputDir, "body.txt"), text ?? "");
+
+    // The shell reserves a strip for the traffic lights by injecting CSS; an
+    // injection that silently failed would leave the header underneath them.
+    const inset = await window.webContents.executeJavaScript(
+      "getComputedStyle(document.body).paddingTop",
+    );
+    process.stdout.write(`smoke: body padding-top ${inset}\n`);
+    if (process.platform === "darwin" && parseFloat(inset) < 20) {
+      failures.push(`titlebar inset did not apply (padding-top ${inset})`);
+    }
 
     const errors = await window.webContents.executeJavaScript("window.__cockpitErrors ?? []");
     await fs.writeFile(path.join(outputDir, "console-errors.json"), JSON.stringify(errors, null, 2));

@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, ipcMain, protocol, shell } from "electron";
 
 import { buildKeymap, interceptedChords, resolve } from "./keymap.mjs";
+import { chromeForPlatform } from "./window-chrome.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const rendererDir = path.join(path.dirname(here), "renderer");
@@ -76,13 +77,14 @@ async function serveRenderer(request) {
 }
 
 function createWindow() {
+  const chrome = chromeForPlatform(process.platform);
   const window = new BrowserWindow({
     width: 1180,
     height: 820,
     minWidth: 720,
     minHeight: 480,
     backgroundColor: "#0b0b0b",
-    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
+    titleBarStyle: chrome.titleBarStyle,
     webPreferences: {
       preload: path.join(here, "preload.cjs"),
       contextIsolation: true,
@@ -92,15 +94,11 @@ function createWindow() {
     },
   });
 
-  // The traffic lights float over the page on a hiddenInset title bar, so the
-  // first row of content sits underneath them. Reserve the strip in the shell
-  // rather than in the shared UI, which the phone also renders and where this
-  // space would be dead margin.
-  if (process.platform === "darwin") {
+  // A hidden title bar floats the window buttons over the page, so the strip has
+  // to be reserved here rather than in the shared UI that the phone also renders.
+  if (chrome.needsTitlebarInset) {
     window.webContents.on("dom-ready", () => {
-      void window.webContents.insertCSS(
-        "body{padding-top:env(titlebar-area-height,28px)!important;box-sizing:border-box}",
-      );
+      void window.webContents.insertCSS(chrome.insetCss);
     });
   }
 

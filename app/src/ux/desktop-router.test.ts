@@ -6,6 +6,27 @@ import { routeDesktopAction, storeBackedActions } from './desktop-router';
 const route = (action: string, context = { hasSession: true }) =>
   routeDesktopAction(resolveDesktopAction(action), context);
 
+it('lets a mounted screen outrank the store for the same action', () => {
+  // The store interrupts whichever session was opened last, and that reference
+  // outlives the screen that opened it. Escape on the new-session screen reached
+  // the store and interrupted a session the user had left and could not see.
+  const outcome = routeDesktopAction(
+    { kind: 'native', id: 'interrupt' },
+    { hasSession: true, screenHandles: new Set(['interrupt']) },
+  );
+
+  expect(outcome).toEqual({ kind: 'screen', action: 'interrupt' });
+});
+
+it('still reaches the store when no screen claims the action', () => {
+  const outcome = routeDesktopAction(
+    { kind: 'native', id: 'interrupt' },
+    { hasSession: true, screenHandles: new Set(['scroll-to-last']) },
+  );
+
+  expect(outcome).toEqual({ kind: 'store', action: 'interrupt' });
+});
+
 describe('desktop action routing', () => {
   it('performs what the store can do with the session that is open', () => {
     expect(route('session_interrupt')).toEqual({ kind: 'store', action: 'interrupt' });

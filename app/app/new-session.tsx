@@ -1,9 +1,10 @@
 import { router } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { executionScopeKey, useOpenCodeMobileStore } from '@/src/store/mobile-store';
+import { useScreenActions } from '@/src/ux/use-desktop-shell';
 import { palette } from '@/src/ui/palette';
 import { buildDeviceSelectionModel, isDeviceChoiceSelectable } from '@/src/ux/device-selection';
 import { encodeSessionRouteKey } from '@/src/ux/session-forest';
@@ -76,6 +77,15 @@ export default function NewSessionScreen() {
     router.push({ pathname: '/session/[sessionKey]', params: { sessionKey: encodeSessionRouteKey(ref) } });
   };
 
+  const leave = useCallback(() => {
+    if (router.canGoBack()) router.back();
+    else router.replace('/(tabs)/two');
+  }, []);
+
+  // Claiming Escape here is what stops it reaching the store, where it would
+  // interrupt whichever session was open last rather than closing this screen.
+  useScreenActions({ interrupt: leave }, [leave]);
+
   return (
     <SafeAreaView style={styles.screen}>
       <ScrollView contentContainerStyle={styles.content}>
@@ -85,7 +95,7 @@ export default function NewSessionScreen() {
             accessibilityLabel="Go back"
             testID="new-session-back"
             style={styles.backButton}
-            onPress={() => (router.canGoBack() ? router.back() : router.replace('/(tabs)/two'))}>
+            onPress={leave}>
             <Text style={styles.backGlyph}>‹</Text>
           </Pressable>
           <Text testID="new-session-title" style={styles.title}>New session</Text>

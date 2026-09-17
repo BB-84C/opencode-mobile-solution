@@ -76,6 +76,12 @@ export function routeDesktopAction(
     return { kind: 'report', action: target.action, reason: 'unsupported' };
   }
 
+  const id = target.kind === 'entrypoint' ? `entrypoint:${target.id}` : target.id;
+
+  // A mounted screen outranks the store, which acts on whichever session was
+  // opened last: Escape on the new-session screen interrupted an unseen one.
+  if (context.screenHandles?.has(id)) return { kind: 'screen', action: id };
+
   const storeAction = target.kind === 'native'
     ? NATIVE_TO_STORE[target.id]
     : target.kind === 'command'
@@ -88,9 +94,6 @@ export function routeDesktopAction(
     }
     return { kind: 'store', action: storeAction };
   }
-
-  const id = target.kind === 'entrypoint' ? `entrypoint:${target.id}` : target.id;
-  if (context.screenHandles?.has(id)) return { kind: 'screen', action: id };
 
   return { kind: 'report', action: id, reason: 'not-implemented' };
 }

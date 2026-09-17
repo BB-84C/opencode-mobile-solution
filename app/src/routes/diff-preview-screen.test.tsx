@@ -77,7 +77,7 @@ describe('DiffPreviewScreen layout', () => {
     act(() => { screen = create(<DiffPreviewScreen />); });
 
     const subtitle = screen!.root.findByProps({ testID: 'diff-preview-subtitle' });
-    expect(String(subtitle.props.children)).toContain('No changes in this session yet');
+    expect(String(subtitle.props.children)).toContain('No file changes recorded');
   });
 
   it('keeps the local fixture when opened without a session, for copy QA', () => {

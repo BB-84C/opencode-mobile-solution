@@ -139,6 +139,16 @@ export default function SessionScreen() {
   const [transcriptWindowSize, setTranscriptWindowSize] = useState(INITIAL_TRANSCRIPT_WINDOW);
   const transcriptRef = useRef<VirtualizedTranscriptHandle>(null);
 
+  // The diff belongs to this session, so it is addressed by route rather than
+  // read from whichever session happens to be active when the page opens.
+  const openDiffs = useCallback(() => {
+    if (!ref) return;
+    router.push({
+      pathname: '/diff-preview',
+      params: { connectionId: ref.connectionId, machine: ref.relayTargetID ?? '', session: ref.sessionId },
+    });
+  }, [ref]);
+
   useDesktopContext('messages');
 
   // Scrolling needs the list itself, so the desktop shell cannot do it from the
@@ -150,15 +160,7 @@ export default function SessionScreen() {
     'scroll-half-page-down': () => { transcriptRef.current?.scroll('half-page-down'); },
     'scroll-to-first': () => { transcriptRef.current?.scroll('to-oldest'); },
     'scroll-to-last': () => { transcriptRef.current?.scroll('to-latest'); },
-    // The diff belongs to this session, so it is addressed by route rather than
-    // read from whichever session happens to be active when the page opens.
-    'entrypoint:diffs': () => {
-      if (!ref) return;
-      router.push({
-        pathname: '/diff-preview',
-        params: { connectionId: ref.connectionId, machine: ref.relayTargetID ?? '', session: ref.sessionId },
-      });
-    },
+    'entrypoint:diffs': () => openDiffs(),
     // These surfaces existed but answered to no key, so every shortcut that
     // meant to open one reported itself unwired.
     'entrypoint:commands': () => setCommandsVisible(true),
@@ -574,6 +576,7 @@ export default function SessionScreen() {
           items={[
             { id: 'hierarchy', label: 'Conversation tree', detail: `${node.children.length} child session${node.children.length === 1 ? '' : 's'}`, onPress: () => setHierarchyVisible(true) },
             { id: 'commands', label: 'Commands', detail: `${contract?.commands.length ?? 0} from this machine`, onPress: () => setCommandsVisible(true) },
+            { id: 'diffs', label: 'Changed files', detail: 'Files this session edited, with the lines added and removed', onPress: () => openDiffs() },
             { id: 'subagents', label: 'Subagents', detail: `${subagents.entries.length} transcript${subagents.entries.length === 1 ? '' : 's'}`, onPress: () => setSubagentsVisible(true) },
             { id: 'rename', label: 'Rename', onPress: () => { setRenameTitle(session.title ?? ''); setRenameVisible(true); } },
             { id: 'share', label: 'Copy share link', onPress: async () => { const url = await store.shareSession(ref); if (url) await Clipboard.setStringAsync(url); } },

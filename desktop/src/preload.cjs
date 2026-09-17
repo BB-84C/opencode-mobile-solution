@@ -15,7 +15,29 @@ window.addEventListener("error", (event) => {
 window.addEventListener("unhandledrejection", (event) => {
   pageErrors.push(`unhandled rejection: ${String(event.reason)}`);
 });
-contextBridge.exposeInMainWorld("__cockpitErrors", pageErrors);
+
+
+// Every action the shell delivers, in order. Collected for the same reason as
+// the errors above: a smoke run has to tell "the key never arrived" apart from
+// "it arrived and nothing downstream handled it", and those two have identical
+// symptoms on screen.
+const deliveredActions = [];
+// Recorded here rather than inside onAction: this has to answer "did the shell
+// send it", which stays true even when the page never subscribed. Hanging it off
+// the app's own listener would conflate the two and report a delivered action as
+// missing.
+ipcRenderer.on("cockpit:action", (_event, payload) => {
+  deliveredActions.push(payload?.action ?? String(payload));
+});
+// Exposed as functions, not as the arrays themselves. contextBridge deep-clones
+// a value it copies across, so an array handed over directly is a dead snapshot:
+// every later push lands in this world and is invisible in the page's. A smoke
+// reading that copy sees an empty list no matter what happened, which is how a
+// console-error check passed for weeks without ever being able to fail.
+contextBridge.exposeInMainWorld("__cockpitProbe", {
+  actions: () => deliveredActions.slice(),
+  errors: () => pageErrors.slice(),
+});
 
 const VALID_CONTEXTS = new Set([
   "global",

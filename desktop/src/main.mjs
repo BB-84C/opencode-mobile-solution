@@ -112,6 +112,15 @@ function createWindow() {
       context: currentContext,
       leaderPending,
     });
+    if (process.env.COCKPIT_SMOKE_OUT) {
+      keyTrace.push({
+        key: input.key,
+        control: input.control, meta: input.meta, alt: input.alt, shift: input.shift,
+        context: currentContext,
+        leaderPendingBefore: leaderPending,
+        action: outcome.action ?? null,
+      });
+    }
     leaderPending = outcome.leaderPending;
 
     if (outcome.action) {
@@ -143,6 +152,10 @@ function createWindow() {
 
   return window;
 }
+
+// What sendInputEvent calls the modifier keys, keyed by how a binding spells it.
+const MODIFIER_NAMES = { ctrl: "control", control: "control", cmd: "meta", command: "meta", meta: "meta", alt: "alt", option: "alt", shift: "shift" };
+const KNOWN_MODIFIERS = new Set(["control", "meta", "alt", "shift"]);
 
 async function runSmoke(window, outputDir) {
   const failures = [];
@@ -228,24 +241,69 @@ async function runSmoke(window, outputDir) {
       process.stdout.write(`smoke: renderer fetch -> ${reach.status} ${JSON.stringify(reach.body)}\n`);
     }
 
-    const errors = await window.webContents.executeJavaScript("window.__cockpitErrors ?? []");
+    const errors = await window.webContents.executeJavaScript("window.__cockpitProbe ? window.__cockpitProbe.errors() : []");
     await fs.writeFile(path.join(outputDir, "console-errors.json"), JSON.stringify(errors, null, 2));
 
     // Press a key for real and look for its consequence in the page. Anything
     // less proves the shell resolved a binding, not that the app acted on it:
     // the chain from keymap through IPC, routing and the store is only tested
     // by something the user could have seen.
+    // Some screens can only be reached by pointer, so a keyboard smoke needs a
+    // way in before it can press anything meaningful.
+    if (process.env.COCKPIT_SMOKE_CLICK) {
+      const clicked = await window.webContents.executeJavaScript(
+        `(() => {
+           const el = document.querySelector(${JSON.stringify(process.env.COCKPIT_SMOKE_CLICK)});
+           if (!el) return false;
+           el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+           el.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+           el.click();
+           return true;
+         })()`,
+      );
+      process.stdout.write(`smoke: clicked ${process.env.COCKPIT_SMOKE_CLICK} -> ${clicked}\n`);
+      if (!clicked) failures.push(`nothing matched ${process.env.COCKPIT_SMOKE_CLICK}`);
+      await new Promise((done) => setTimeout(done, 3_000));
+      const afterClick = await window.webContents.executeJavaScript("document.body.innerText");
+      await fs.writeFile(path.join(outputDir, "body-after-click.txt"), afterClick ?? "");
+      process.stdout.write(`smoke: after click "${(afterClick ?? "").split("\n")[0]}"\n`);
+    }
+
     if (process.env.COCKPIT_SMOKE_KEY) {
       window.webContents.focus();
       // A comma separates chords in a sequence, so a leader binding such as
       // "ctrl+x,n" can be exercised the way a user actually types it.
       for (const chord of process.env.COCKPIT_SMOKE_KEY.split(",")) {
-        const [key, ...modifiers] = chord.trim().split("+").reverse();
+        const [key, ...rest] = chord.trim().split("+").reverse();
+        // sendInputEvent names modifiers its own way and silently ignores a name
+        // it does not know. "ctrl" is such a name: the modifier vanished, the
+        // press landed as a bare letter, and a smoke that pressed nothing of the
+        // sort still reported the screen had changed.
+        const modifiers = rest.map((name) => MODIFIER_NAMES[name.toLowerCase()] ?? name.toLowerCase());
+        const unknown = modifiers.filter((name) => !KNOWN_MODIFIERS.has(name));
+        if (unknown.length > 0) failures.push(`unknown modifier(s) in "${chord}": ${unknown.join(", ")}`);
         window.webContents.sendInputEvent({ type: "keyDown", keyCode: key, modifiers });
         window.webContents.sendInputEvent({ type: "keyUp", keyCode: key, modifiers });
         await new Promise((done) => setTimeout(done, 250));
       }
       await new Promise((done) => setTimeout(done, 1_200));
+
+      // Which actions the shell actually delivered to the page. Without this,
+      // "the key never resolved" and "it resolved and nothing handled it" look
+      // identical from the outside, and they need opposite fixes.
+      await fs.writeFile(path.join(outputDir, "key-trace.json"), JSON.stringify(keyTrace, null, 2));
+      process.stdout.write(`smoke: shell saw ${keyTrace.length} keydown(s): ${JSON.stringify(keyTrace.map((k) => `${k.control ? "ctrl+" : ""}${k.key}->${k.action ?? "none"}`))}\n`);
+
+      const delivered = await window.webContents.executeJavaScript("window.__cockpitProbe ? window.__cockpitProbe.actions() : []");
+      await fs.writeFile(path.join(outputDir, "delivered-actions.json"), JSON.stringify(delivered, null, 2));
+      process.stdout.write(`smoke: shell delivered ${JSON.stringify(delivered)}\n`);
+
+      if (process.env.COCKPIT_SMOKE_EVAL) {
+        const value = await window.webContents.executeJavaScript(
+          `(() => { try { return JSON.stringify(${process.env.COCKPIT_SMOKE_EVAL}); } catch (e) { return "threw: " + String(e); } })()`,
+        );
+        process.stdout.write(`smoke: eval -> ${value}\n`);
+      }
 
       const afterKey = await window.webContents.executeJavaScript("document.body.innerText");
       await fs.writeFile(path.join(outputDir, "body-after-key.txt"), afterKey ?? "");
@@ -269,6 +327,7 @@ async function runSmoke(window, outputDir) {
   app.exit(failures.length === 0 ? 0 : 1);
 }
 
+const keyTrace = [];
 let currentContext = "global";
 
 ipcMain.on("cockpit:context", (_event, context) => {

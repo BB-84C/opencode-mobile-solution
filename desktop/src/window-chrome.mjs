@@ -18,8 +18,13 @@ export function chromeForPlatform(platform) {
   return {
     titleBarStyle: framelessTitleBar ? "hiddenInset" : "default",
     needsTitlebarInset: framelessTitleBar,
+    // A transform rather than padding. Padding moves the document flow and
+    // leaves fixed overlays where they were, so every dialog still rendered
+    // under the window buttons. Transforming body makes it the containing block
+    // for its fixed descendants, and the height is trimmed by the same amount so
+    // nothing falls off the bottom.
     insetCss: framelessTitleBar
-      ? `body{padding-top:env(titlebar-area-height,${TITLEBAR_INSET_PX}px)!important;box-sizing:border-box}`
+      ? `body{transform:translateY(${TITLEBAR_INSET_PX}px)!important;height:calc(100vh - ${TITLEBAR_INSET_PX}px)!important;box-sizing:border-box}`
       : null,
   };
 }

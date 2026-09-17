@@ -10,7 +10,7 @@ test('macOS hides the title bar and therefore has to reserve a strip for the win
 
   assert.equal(chrome.titleBarStyle, 'hiddenInset');
   assert.equal(chrome.needsTitlebarInset, true);
-  assert.match(chrome.insetCss, /padding-top/);
+  assert.match(chrome.insetCss, /translateY/);
 });
 
 test('elsewhere the OS draws a real title bar, so reserving that strip would be dead margin', () => {
@@ -42,6 +42,16 @@ test('a frameless title bar always comes with its inset, on every platform', () 
       `${platform}: CSS must be supplied exactly when the inset is needed`,
     );
   }
+});
+
+test('the inset moves fixed overlays too, not just the document flow', () => {
+  // Padding left every dialog under the window buttons: a fixed element is
+  // positioned against the viewport and ignores an ancestor's padding.
+  const css = chromeForPlatform('darwin').insetCss;
+
+  assert.match(css, /transform:translateY/, 'must transform, so body becomes the containing block');
+  assert.match(css, /height:calc\(100vh - \d+px\)/, 'must trim the height by the same amount');
+  assert.ok(!/padding-top/.test(css), 'padding alone is what left dialogs overlapping');
 });
 
 test('reserves enough room for the buttons to sit clear of the content', () => {

@@ -22,7 +22,9 @@ export function useDesktopShell(): void {
     const host = detectDesktopShellHost();
     if (!host) return undefined;
 
-    const report = (message: string) => useOpenCodeMobileStore.setState({ error: message });
+    // Not `error`: screens render that as a failed host sync, which labelled
+    // every keyboard message a "Sync warning" and hid it outside the list.
+    const report = (message: string) => useOpenCodeMobileStore.getState().showNotice(message);
 
     const bridge = createDesktopActionBridge({
       host,

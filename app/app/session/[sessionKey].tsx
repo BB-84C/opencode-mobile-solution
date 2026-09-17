@@ -157,6 +157,15 @@ export default function SessionScreen() {
         params: { connectionId: ref.connectionId, machine: ref.relayTargetID ?? '', session: ref.sessionId },
       });
     },
+    // These surfaces existed but answered to no key, so every shortcut that
+    // meant to open one reported itself unwired.
+    'entrypoint:commands': () => setCommandsVisible(true),
+    'entrypoint:session-details': () => setMenuVisible(true),
+    'entrypoint:subagents': () => setSubagentsVisible(true),
+    'model-list': () => setModelVisible(true),
+    'child-session-next': () => setHierarchyVisible(true),
+    'child-session-previous': () => setHierarchyVisible(true),
+    'parent-session': () => setHierarchyVisible(true),
   });
 
   const activeHost = ref ? store.connections.find((connection) => connection.id === ref.connectionId) : undefined;
@@ -431,6 +440,17 @@ export default function SessionScreen() {
             onBottomStateChange={setTranscriptAtBottom}
             onOlderEndReached={revealOlderTranscript}
           />
+          {renderedTranscript.length > 0 ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Scroll to the first message"
+              testID="session-scroll-to-top"
+              style={styles.scrollToTop}
+              onPress={() => transcriptRef.current?.scroll('to-oldest')}>
+              <SymbolView name={{ ios: 'arrow.up', android: 'arrow_upward', web: 'arrow_upward' }} tintColor={palette.text} size={15} />
+              <Text style={styles.scrollToTopText}>Top</Text>
+            </Pressable>
+          ) : null}
           {!transcriptAtBottom ? (
             <Pressable
               accessibilityRole="button"
@@ -749,6 +769,8 @@ const styles = StyleSheet.create({
   subtitle: { fontSize: 10, lineHeight: 13, color: palette.textMuted },
   transcriptFrame: { flex: 1, position: 'relative' },
   transcript: { flex: 1 },
+  scrollToTop: { position: 'absolute', right: 10, bottom: 52, minHeight: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingHorizontal: 12, borderRadius: 18, borderWidth: 1, borderColor: palette.borderSubtle, backgroundColor: palette.backgroundPanel },
+  scrollToTopText: { fontSize: 12, fontWeight: '800', color: palette.text },
   scrollToLatest: { position: 'absolute', right: 10, bottom: 10, minHeight: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingHorizontal: 12, borderRadius: 18, backgroundColor: palette.primary },
   scrollToLatestText: { fontSize: 12, fontWeight: '800', color: palette.foregroundOnAccent },
   notice: { paddingHorizontal: 9, paddingVertical: 4, fontSize: 10, color: palette.info, backgroundColor: palette.infoBg },

@@ -32,6 +32,61 @@ export interface CreationModelOption {
   label: string;
 }
 
+export interface DirectoryChoice {
+  directory: string;
+  /** What to show: the trailing folder name is what a person recognises. */
+  label: string;
+  detail: string;
+  isDefault: boolean;
+  selected: boolean;
+}
+
+/**
+ * Directories this machine already has sessions in, offered so a phone user
+ * never has to type an absolute path from memory. The machine's own default
+ * comes first and is what an empty field already resolves to.
+ */
+export function buildDirectoryChoices(input: {
+  projects: readonly { directory: string; sessionCount: number; relayTargetID?: string }[];
+  targetId?: string;
+  defaultDirectory?: string;
+  current: string;
+  limit?: number;
+}): DirectoryChoice[] {
+  const current = input.current.trim();
+  const seen = new Set<string>();
+  const choices: DirectoryChoice[] = [];
+
+  const push = (directory: string, sessionCount: number, isDefault: boolean) => {
+    if (!directory || seen.has(directory)) return;
+    seen.add(directory);
+    choices.push({
+      directory,
+      label: directory.split('/').filter(Boolean).at(-1) ?? directory,
+      detail: isDefault && sessionCount === 0
+        ? `${directory} · machine default`
+        : `${directory} · ${sessionCount} session${sessionCount === 1 ? '' : 's'}`,
+      isDefault,
+      selected: current === directory || (current === '' && isDefault),
+    });
+  };
+
+  const mine = input.projects
+    .filter((project) => !project.relayTargetID || !input.targetId || project.relayTargetID === input.targetId);
+
+  if (input.defaultDirectory) {
+    const existing = mine.find((project) => project.directory === input.defaultDirectory);
+    push(input.defaultDirectory, existing?.sessionCount ?? 0, true);
+  }
+
+  for (const project of [...mine].sort((a, b) => b.sessionCount - a.sessionCount)) {
+    if (choices.length >= (input.limit ?? 8)) break;
+    push(project.directory, project.sessionCount, false);
+  }
+
+  return choices;
+}
+
 export interface SessionCreationOptions {
   agents: CreationAgentOption[];
   models: CreationModelOption[];

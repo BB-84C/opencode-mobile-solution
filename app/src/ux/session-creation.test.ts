@@ -4,6 +4,7 @@ import {
   buildSessionCreationOptions,
   validateSessionCreation,
   type SessionCreationOptions,
+  buildDirectoryChoices,
 } from './session-creation';
 import type { MachineExecutionContract } from '../opencode/types';
 
@@ -122,5 +123,75 @@ describe('new session validation', () => {
     const result = validateSessionCreation({ machine, title: '   ' }, options());
 
     expect(result.ok && 'title' in result.plan.create).toBe(false);
+  });
+});
+
+describe('directory choices', () => {
+  const project = (directory: string, sessionCount: number, relayTargetID?: string) =>
+    ({ directory, sessionCount, relayTargetID });
+
+  it('puts the machine default first, so an empty field has a visible meaning', () => {
+    // Typing an absolute path on a phone is the problem this solves: leaving the
+    // field empty already uses the machine default, but nothing said so.
+    const choices = buildDirectoryChoices({
+      projects: [project('/Users/me/work', 4)],
+      defaultDirectory: '/Users/me',
+      current: '',
+    });
+
+    expect(choices[0].directory).toBe('/Users/me');
+    expect(choices[0].isDefault).toBe(true);
+    expect(choices[0].selected).toBe(true);
+    expect(choices[0].detail).toContain('machine default');
+  });
+
+  it('offers the directories the machine already has sessions in, busiest first', () => {
+    const choices = buildDirectoryChoices({
+      projects: [project('/a', 1), project('/b', 9), project('/c', 3)],
+      current: '',
+    });
+
+    expect(choices.map((choice) => choice.directory)).toEqual(['/b', '/c', '/a']);
+  });
+
+  it('shows the folder name, because that is what a person recognises', () => {
+    const [choice] = buildDirectoryChoices({
+      projects: [project('/Users/me/Documents/essay draft', 2)],
+      current: '',
+    });
+
+    expect(choice.label).toBe('essay draft');
+    expect(choice.detail).toContain('/Users/me/Documents/essay draft');
+  });
+
+  it('never lists the same directory twice, even when it is also the default', () => {
+    const choices = buildDirectoryChoices({
+      projects: [project('/Users/me', 7)],
+      defaultDirectory: '/Users/me',
+      current: '',
+    });
+
+    expect(choices).toHaveLength(1);
+    expect(choices[0].detail).toContain('7 sessions');
+  });
+
+  it('leaves out directories belonging to another machine', () => {
+    const choices = buildDirectoryChoices({
+      projects: [project('/mine', 2, 'mac'), project('/theirs', 5, 'windows')],
+      targetId: 'mac',
+      current: '',
+    });
+
+    expect(choices.map((choice) => choice.directory)).toEqual(['/mine']);
+  });
+
+  it('marks whichever directory is currently entered', () => {
+    const choices = buildDirectoryChoices({
+      projects: [project('/a', 1), project('/b', 2)],
+      current: '/a',
+    });
+
+    expect(choices.find((choice) => choice.directory === '/a')?.selected).toBe(true);
+    expect(choices.find((choice) => choice.directory === '/b')?.selected).toBe(false);
   });
 });

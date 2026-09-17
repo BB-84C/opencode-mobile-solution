@@ -11,6 +11,7 @@ import { encodeSessionRouteKey } from '@/src/ux/session-forest';
 import {
   buildSessionCreationOptions,
   validateSessionCreation,
+  buildDirectoryChoices,
   type CreationMachine,
 } from '@/src/ux/session-creation';
 
@@ -56,6 +57,18 @@ export default function NewSessionScreen() {
     }).finally(() => { if (!cancelled) setLoadingContract(false); });
     return () => { cancelled = true; };
   }, [machine?.connectionId, machine?.targetId, directory, options.contractMissing]);
+
+  // Typing an absolute path on a phone keyboard is the problem here, so the
+  // directories this machine already works in are offered as one tap each.
+  const directoryChoices = useMemo(
+    () => buildDirectoryChoices({
+      projects: machine ? store.projects[machine.connectionId] ?? [] : [],
+      targetId: machine?.targetId,
+      defaultDirectory: options.defaultDirectory,
+      current: directory,
+    }),
+    [machine, store.projects, options.defaultDirectory, directory],
+  );
 
   const create = async () => {
     const validation = validateSessionCreation({ machine, directory, agentName, modelKey }, options);
@@ -125,6 +138,22 @@ export default function NewSessionScreen() {
         )}
 
         <Text style={styles.label}>Working directory</Text>
+        {directoryChoices.length > 0 ? (
+          <View testID="new-session-directory-choices" style={styles.choices}>
+            {directoryChoices.map((choice) => (
+              <Pressable
+                key={choice.directory}
+                accessibilityRole="button"
+                accessibilityState={{ selected: choice.selected }}
+                testID={`new-session-directory-${choice.directory}`}
+                style={[styles.choice, choice.selected && styles.choiceOn]}
+                onPress={() => setDirectory(choice.isDefault ? '' : choice.directory)}>
+                <Text style={[styles.choiceName, choice.selected && styles.choiceNameOn]}>{choice.label}</Text>
+                <Text numberOfLines={1} style={styles.choiceDetail}>{choice.detail}</Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
         <TextInput
           testID="new-session-directory"
           value={directory}
@@ -135,6 +164,11 @@ export default function NewSessionScreen() {
           autoCorrect={false}
           style={styles.input}
         />
+        <Text style={styles.hint}>
+          {options.defaultDirectory
+            ? `Leave it empty to use ${options.defaultDirectory}. Paths must be absolute; "~" is not expanded.`
+            : 'Leave it empty to use the machine default. Paths must be absolute; "~" is not expanded.'}
+        </Text>
 
         <Text style={styles.label}>Agent</Text>
         {options.contractMissing ? (
@@ -197,6 +231,13 @@ const styles = StyleSheet.create({
   titleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   backButton: { minWidth: 36, minHeight: 36, alignItems: 'center', justifyContent: 'center' },
   backGlyph: { fontSize: 28, lineHeight: 30, color: palette.text },
+  choices: { gap: 8, marginBottom: 10 },
+  choice: { borderRadius: 11, borderWidth: 1, borderColor: palette.borderSubtle, backgroundColor: palette.backgroundElement, paddingVertical: 9, paddingHorizontal: 12 },
+  choiceOn: { borderColor: palette.primary },
+  choiceName: { fontSize: 14, fontWeight: '700', color: palette.text },
+  choiceNameOn: { color: palette.primary },
+  choiceDetail: { fontSize: 11, color: palette.textMuted },
+  hint: { fontSize: 11, lineHeight: 16, color: palette.textMuted, marginTop: 6 },
   title: { fontSize: 22, fontWeight: '800', color: palette.text, marginBottom: 4 },
   label: { fontSize: 12, fontWeight: '800', color: palette.textMuted, marginTop: 10 },
   muted: { fontSize: 12, color: palette.textMuted },

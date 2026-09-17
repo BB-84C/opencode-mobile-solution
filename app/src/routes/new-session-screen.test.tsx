@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => {
   const state = {
     connections: [] as any[],
     relayTargets: {} as Record<string, any[]>,
+    projects: {} as Record<string, any[]>,
     machineContracts: {} as Record<string, any>,
     error: null as string | null,
     createSession: vi.fn(),
@@ -98,6 +99,26 @@ beforeEach(() => {
 });
 
 describe('NewSessionScreen route', () => {
+  it('offers the directories this machine already works in, so nothing has to be typed', async () => {
+    // Typing an absolute path on a phone keyboard is the whole problem: "/~" is
+    // not a path the relay accepts, and the folder a person wants is one they
+    // already have sessions in.
+    mocks.state.projects = {
+      office: [
+        { name: 'whitepaper', directory: '/Users/me/Documents/whitepaper', sessionCount: 6 },
+        { name: 'home', directory: '/Users/me', sessionCount: 2 },
+      ],
+    };
+    const tree = render();
+    await press(tree, 'new-session-machine-mac');
+
+    const choice = tree.root.findByProps({ testID: 'new-session-directory-/Users/me/Documents/whitepaper' });
+    await act(async () => { choice.props.onPress(); });
+
+    expect(tree.root.findByProps({ testID: 'new-session-directory' }).props.value)
+      .toBe('/Users/me/Documents/whitepaper');
+  });
+
   it('offers only the machines that are answering', () => {
     const tree = render();
 

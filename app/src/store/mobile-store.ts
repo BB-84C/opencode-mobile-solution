@@ -2069,8 +2069,19 @@ function sessionIdFromServerEvent(event: ServerEvent) {
     ?? (event.type.startsWith('session.') ? stringValue(info?.id) : undefined);
 }
 
+// The relay answers a rejected path with a bare token. Shown as-is it reads as
+// a demand for a directory rather than as "that path is not one".
+const RELAY_ERROR_TEXT: Record<string, string> = {
+  directory_forbidden: 'That working directory is not usable on this machine. Pick one of the offered directories, or leave it empty to use the machine default. Paths must be absolute, and "~" is not expanded.',
+  target_forbidden: 'This device is not authorized for that machine.',
+};
+
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
+  const raw = error instanceof Error ? error.message : String(error);
+  for (const [token, text] of Object.entries(RELAY_ERROR_TEXT)) {
+    if (raw.includes(token)) return text;
+  }
+  return raw;
 }
 
 function summarizeSyncIssues(issues: string[]) {

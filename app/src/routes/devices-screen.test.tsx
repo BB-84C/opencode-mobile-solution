@@ -72,6 +72,17 @@ beforeEach(() => {
 });
 
 describe('DevicesScreen route', () => {
+  it('always offers a way to manage hosts, even when every host is unreachable', () => {
+    // Without this the screen is a dead end: it lives outside the tabs, so an
+    // unreachable host leaves no way to add, edit or remove one.
+    mocks.state.connections = [host('office', 'Office Mac', false)];
+    mocks.state.relayTargets = {};
+
+    const text = textOf(render());
+
+    expect(text).toContain('Manage hosts');
+  });
+
   it('asks the relay for its machines when nothing is cached yet', async () => {
     // The screen only reads the list. On a cold start nothing has fetched it, so
     // without this it reports "no machine authorized" for a healthy relay.

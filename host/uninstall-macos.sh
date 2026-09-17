@@ -61,9 +61,13 @@ log "serve port : $SERVE_PORT"
 log "purge      : $([ "$PURGE" -eq 1 ] && echo yes || echo 'no (credentials and pairings kept)')"
 
 JOBS=()
-while IFS= read -r label; do
-  [ -n "$label" ] && JOBS+=("$label")
-done < <(launchctl list 2>/dev/null | awk '$3 ~ /^com\.skylerhu\.cockpit-/ {print $3}')
+# Shadow runs under nohup and installs no launchd job, so matching by label
+# prefix found the production relay instead and took the live stack off the air.
+if [ "$MODE" != "shadow" ]; then
+  while IFS= read -r label; do
+    [ -n "$label" ] && JOBS+=("$label")
+  done < <(launchctl list 2>/dev/null | awk '$3 ~ /^com\.skylerhu\.cockpit-/ {print $3}')
+fi
 
 for job in ${JOBS+"${JOBS[@]}"}; do log "will unload launchd job: $job"; done
 [ -f "$CONFIG_DIR/relay.pid" ] && log "will stop shadow relay pid $(cat "$CONFIG_DIR/relay.pid")"

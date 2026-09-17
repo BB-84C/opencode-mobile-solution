@@ -116,6 +116,15 @@ export default function DevicesScreen() {
             })}
           </View>
         ))}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Manage hosts"
+          testID="devices-manage-hosts"
+          style={styles.manage}
+          onPress={() => router.push('/(tabs)')}>
+          <Text style={styles.manageText}>Manage hosts</Text>
+          <Text style={styles.note}>Add a relay, edit its address or token, or remove one</Text>
+        </Pressable>
       </ScrollView>
     </SafeAreaView>
   );
@@ -133,6 +142,8 @@ const styles = StyleSheet.create({
   badge: { fontSize: 11, fontWeight: '700', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 9, overflow: 'hidden' },
   badgeUp: { color: palette.background, backgroundColor: palette.success },
   badgeDown: { color: palette.background, backgroundColor: palette.textMuted },
+  manage: { borderRadius: 14, borderWidth: 1, borderColor: palette.borderSubtle, backgroundColor: palette.backgroundPanel, padding: 14, gap: 4 },
+  manageText: { fontSize: 15, fontWeight: '700', color: palette.primary },
   note: { fontSize: 12, lineHeight: 17, color: palette.textMuted },
   choice: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingVertical: 11, paddingHorizontal: 12, borderRadius: 11, backgroundColor: palette.backgroundElement },
   choiceBlocked: { opacity: 0.55 },

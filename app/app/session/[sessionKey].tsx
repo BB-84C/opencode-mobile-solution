@@ -117,6 +117,7 @@ export default function SessionScreen() {
     setSessionVariant: state.setSessionVariant,
     togglePromptMode: state.togglePromptMode,
     requestInterrupt: state.requestInterrupt,
+    deleteSession: state.deleteSession,
   })));
   const [prompt, setPrompt] = useState('');
   const [actionError, setActionError] = useState<string | null>(null);
@@ -127,6 +128,7 @@ export default function SessionScreen() {
   const [commandsVisible, setCommandsVisible] = useState(false);
   const [hierarchyVisible, setHierarchyVisible] = useState(false);
   const [subagentsVisible, setSubagentsVisible] = useState(false);
+  const [deleteVisible, setDeleteVisible] = useState(false);
   const [renameVisible, setRenameVisible] = useState(false);
   const [renameTitle, setRenameTitle] = useState('');
   const [renameSubmitting, setRenameSubmitting] = useState(false);
@@ -582,6 +584,27 @@ export default function SessionScreen() {
             { id: 'export', label: 'Export transcript', onPress: async () => Clipboard.setStringAsync(createSessionExportArtifact({ session, messages: transcript })) },
             { id: 'toggle-actions', label: showActions ? 'Hide message actions' : 'Show message actions', onPress: () => setShowActions((value) => !value) },
             { id: 'toggle-time', label: showTimestamps ? 'Hide timestamps' : 'Show timestamps', onPress: () => setShowTimestamps((value) => !value) },
+            { id: 'delete-session', label: 'Delete session', detail: 'Asks again before anything is removed', danger: true, onPress: () => setDeleteVisible(true) },
+          ]}
+        />
+
+        <ActionModal
+          title="Delete session?"
+          visible={deleteVisible}
+          onClose={() => setDeleteVisible(false)}
+          onActionError={reportError}
+          items={[
+            {
+              id: 'delete-confirm',
+              label: 'Delete permanently',
+              detail: `"${session.title ?? session.id}" is removed on ${session.relayTargetName ?? 'the machine that owns it'}, for every device`,
+              danger: true,
+              onPress: async () => {
+                await store.deleteSession(ref);
+                router.replace('/(tabs)/two');
+              },
+            },
+            { id: 'delete-cancel', label: 'Keep this session', onPress: () => undefined },
           ]}
         />
 

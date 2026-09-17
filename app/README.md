@@ -26,3 +26,30 @@ pairing code, or enter your own relay HTTPS URL and credential.
 
 Before building, update `app.json` with your own app `name`, `slug`, and
 `ios.bundleIdentifier` values.
+
+## Installing on an iPhone over USB
+
+The native project lives in `ios/`, which is not tracked here. Two things about
+this machine's setup are easy to lose and cost an afternoon each:
+
+**The path cannot contain non-ASCII characters.** CocoaPods reads the Podfile
+through Ruby, which fails with `"\xE4" from ASCII-8BIT to UTF-8` as soon as any
+directory in the path is non-Latin. Keep the checkout somewhere ASCII-only.
+
+**Pods that predate the current Xcode need their deployment target raised.**
+Xcode 27 refuses, rather than warns, below iOS 15, and at least one pod still
+declares 13.4. The Podfile's `post_install` lifts every pod to the app's own
+minimum; regenerating the project drops that and the build fails again.
+
+Then:
+
+    cd ios && pod install
+    open opencodemobile.xcworkspace
+
+In Xcode: select the iPhone, set the scheme to **Release** (a Debug build needs
+Metro running on this Mac and will not launch on its own), then Run. A free
+signing certificate expires after seven days, after which the app must be
+installed again.
+
+If Xcode does not list the iPhone, its device support components are stale:
+`sudo xcodebuild -runFirstLaunch`, then reconnect.

@@ -62,7 +62,7 @@ export default function DiffPreviewScreen() {
             {live === null
               ? 'Local fixture for unified diff copy QA.'
               : live.length === 0
-                ? 'No file changes recorded. This fills in while the agent edits files with you connected; the relay backend cannot look up past edits.'
+                ? 'No file changes recorded for this session.'
                 : `${live.length} changed file${live.length === 1 ? '' : 's'} in this session.`}
           </Text>
       </View>

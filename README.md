@@ -1,5 +1,15 @@
 # OpenCode Remote
 
+## 这是什么
+
+把跑在自己电脑上的 OpenCode 会话，带到手机和另一台电脑上。
+
+一台常开的主机跑 OpenCode 后端，中继在前面做鉴权和分流，客户端通过 Tailscale 内网连过来——不开公网端口，不经第三方服务器，凭证在自己手里。手机上能看同一批会话、发指令、看回复；换到桌面客户端是同一套界面，多一套键盘操作。一台主机可以挂多台机器，一个客户端也可以同时连多台主机。
+
+**项目来自朋友 [BB-84C](https://github.com/BB-84C) 的 [opencode-mobile-solution](https://github.com/BB-84C/opencode-mobile-solution)**，这个分支在它的中继和手机端之上，改成了 tailnet 直连、加了 macOS 一键部署和 Electron 桌面端，去掉了原本的 VPS / 内网穿透那条路。应用图标也是他的作品，经本人同意后沿用。
+
+## In English
+
 A template for reaching your own [OpenCode](https://github.com/anomalyco/opencode)
 sessions from a phone or another machine. It is a starting kit, not a hosted
 service: you supply your own domain, tokens, and credentials.

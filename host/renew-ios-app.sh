@@ -31,13 +31,17 @@ if printf '%s' "$IOS_DIR" | LC_ALL=C grep -q '[^ -~]'; then
   die "the checkout path contains non-ASCII characters; CocoaPods cannot read the Podfile from here"
 fi
 
-# Match the UDID's shape, not the state column: devicectl words that column
-# differently depending on how the phone is attached, and finds nothing.
-DEVICE="$(xcrun devicectl list devices 2>/dev/null \
-  | grep "(UDID)" \
-  | grep -oE "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}" \
-  | head -1)"
-[ -n "$DEVICE" ] || die "no paired iPhone is connected; plug it in, unlock it, and trust this Mac"
+devices="$(xcrun devicectl list devices 2>/dev/null | grep "(UDID)" | grep "physical")"
+# A locked phone still lists, as "unavailable"; using its id anyway makes
+# xcodebuild complain about the destination specifier instead of the lock.
+DEVICE="$(printf '%s\n' "$devices" | grep -vi "unavailable" \
+  | grep -oE "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}" | head -1)"
+if [ -z "$DEVICE" ]; then
+  if [ -n "$devices" ]; then
+    die "the iPhone is attached but not usable (devicectl says unavailable); unlock it, and re-plug it if that does not help"
+  fi
+  die "no iPhone is connected; plug it in, unlock it, and trust this Mac"
+fi
 say "device $DEVICE"
 
 cd "$IOS_DIR" || die "cannot enter $IOS_DIR"

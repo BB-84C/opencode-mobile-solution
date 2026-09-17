@@ -151,6 +151,10 @@ export interface MobileStore {
   diffs: Record<string, FileDiff[]>;
   loading: LoadingState;
   error: string | null;
+  /** Transient keyboard/action feedback. Kept apart from `error`, which screens
+   *  render as a host sync failure. */
+  notice: string | null;
+  commandPaletteOpen: boolean;
   hostSyncStates: Record<string, LoadingState>;
   hostSyncErrors: Record<string, string | null>;
   interruptArmedAt: Record<string, number>;
@@ -174,6 +178,13 @@ export interface MobileStore {
   removeConnection(id: string): Promise<void>;
   setActiveConnection(id: string): boolean;
   clearActiveConnection(): void;
+  /** Removes a session on the machine that owns it. Deliberately not bound to
+   *  any key: a satellite device should not be one keystroke from deleting work. */
+  deleteSession(input: SessionRef | string): Promise<void>;
+  showNotice(message: string): void;
+  dismissNotice(): void;
+  openCommandPalette(): void;
+  closeCommandPalette(): void;
   refreshActiveHost(options?: { background?: boolean }): Promise<void>;
   subscribeToActiveHost(): void;
   unsubscribeFromHost(connectionId: string): void;
@@ -292,6 +303,8 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
   diffs: {},
   loading: 'idle',
   error: null,
+  notice: null,
+  commandPaletteOpen: false,
   hostSyncStates: {},
   hostSyncErrors: {},
   interruptArmedAt: {},
@@ -509,6 +522,22 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
       error: null,
     });
     return true;
+  },
+
+  showNotice(message) {
+    set({ notice: message });
+  },
+
+  dismissNotice() {
+    set({ notice: null });
+  },
+
+  openCommandPalette() {
+    set({ commandPaletteOpen: true });
+  },
+
+  closeCommandPalette() {
+    set({ commandPaletteOpen: false });
   },
 
   clearActiveConnection() {
@@ -978,6 +1007,25 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
       set({ error: errorMessage(error) });
       return null;
     }
+  },
+
+  async deleteSession(input) {
+    const { ref, session } = requireSessionContext(input, get());
+    const connection = get().connections.find((item) => item.id === ref.connectionId);
+    if (!connection) throw new Error('That session belongs to a host this device no longer has.');
+    await clientFor(connection, ref.relayTargetID).deleteSession(ref.sessionId, { directory: session.directory });
+    const key = sessionStateKey(ref);
+    set((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ref.connectionId]: (state.sessions[ref.connectionId] ?? []).filter((item) => item.id !== ref.sessionId),
+      },
+      sessionStatuses: omitRecordKey(state.sessionStatuses, key),
+      ...(state.activeSessionKey === key
+        ? { activeSessionRef: null, activeSessionKey: null, activeSessionId: null }
+        : {}),
+    }));
+    set((state) => ({ projects: { ...state.projects, [ref.connectionId]: groupSessionsByDirectory(state.sessions[ref.connectionId] ?? []) } }));
   },
 
   async compactSession(input) {

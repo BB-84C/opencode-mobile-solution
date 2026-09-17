@@ -449,6 +449,13 @@ export class OpenCodeClient implements OpenCodeClientLike {
     });
   }
 
+  async deleteSession(sessionId: string, options: { directory?: string } = {}) {
+    await this.request<void>(`/session/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+      directory: options.directory,
+    });
+  }
+
   async abortSession(sessionId: string) {
     await this.request<void>(`/session/${encodeURIComponent(sessionId)}/abort`, {
       method: 'POST',

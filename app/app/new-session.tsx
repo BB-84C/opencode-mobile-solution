@@ -79,7 +79,17 @@ export default function NewSessionScreen() {
   return (
     <SafeAreaView style={styles.screen}>
       <ScrollView contentContainerStyle={styles.content}>
-        <Text testID="new-session-title" style={styles.title}>New session</Text>
+        <View style={styles.titleRow}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
+            testID="new-session-back"
+            style={styles.backButton}
+            onPress={() => (router.canGoBack() ? router.back() : router.replace('/(tabs)/two'))}>
+            <Text style={styles.backGlyph}>‹</Text>
+          </Pressable>
+          <Text testID="new-session-title" style={styles.title}>New session</Text>
+        </View>
 
         <Text style={styles.label}>Machine</Text>
         {machines.length === 0 ? (
@@ -174,6 +184,9 @@ export default function NewSessionScreen() {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: palette.background },
   content: { padding: 16, gap: 10 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  backButton: { minWidth: 36, minHeight: 36, alignItems: 'center', justifyContent: 'center' },
+  backGlyph: { fontSize: 28, lineHeight: 30, color: palette.text },
   title: { fontSize: 22, fontWeight: '800', color: palette.text, marginBottom: 4 },
   label: { fontSize: 12, fontWeight: '800', color: palette.textMuted, marginTop: 10 },
   muted: { fontSize: 12, color: palette.textMuted },

@@ -15,9 +15,17 @@ export default function SettingsScreen() {
     hydrate,
     refreshActiveHost,
     clearActiveConnection,
+    activeSessionRef,
+    sessions,
+    deleteSession,
   } = useOpenCodeMobileStore();
   const activeHost = connections.find((connection) => connection.id === activeConnectionId);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const openSession = activeSessionRef
+    ? (sessions[activeSessionRef.connectionId] ?? []).find((item) => item.id === activeSessionRef.sessionId)
+    : undefined;
 
   useEffect(() => {
     void hydrate();
@@ -72,6 +80,57 @@ export default function SettingsScreen() {
           </Pressable>
         ) : null}
 
+        <Text style={styles.sectionTitle}>Session</Text>
+        {openSession ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={confirmingDelete ? 'Confirm deleting this session' : 'Delete this session'}
+            testID={confirmingDelete ? 'settings-delete-session-confirm' : 'settings-delete-session'}
+            disabled={deleting}
+            style={[styles.rowButton, deleting && styles.disabledRow]}
+            onPress={async () => {
+              setActionError(null);
+              if (!confirmingDelete) {
+                setConfirmingDelete(true);
+                return;
+              }
+              setDeleting(true);
+              try {
+                await deleteSession(activeSessionRef!);
+                setConfirmingDelete(false);
+                router.replace('/(tabs)/two');
+              } catch (deleteError) {
+                setActionError(deleteError instanceof Error ? deleteError.message : String(deleteError));
+              } finally {
+                setDeleting(false);
+              }
+            }}>
+            <Text style={styles.dangerText}>
+              {deleting ? 'Deleting…' : confirmingDelete ? 'Tap again to delete permanently' : 'Delete this session'}
+            </Text>
+            <Text style={styles.rowDetail} numberOfLines={2}>
+              {confirmingDelete
+                ? `"${openSession.title ?? openSession.id}" will be removed on the machine that owns it`
+                : `"${openSession.title ?? openSession.id}" · removes it for every device, not just this one`}
+            </Text>
+          </Pressable>
+        ) : (
+          <View style={styles.infoCard}>
+            <Text style={styles.cardLabel}>No session is open</Text>
+            <Text style={styles.cardDetail}>Open a session to be able to delete it from here</Text>
+          </View>
+        )}
+        {confirmingDelete && !deleting ? (
+          <Pressable
+            accessibilityRole="button"
+            testID="settings-delete-session-cancel"
+            style={styles.rowButton}
+            onPress={() => setConfirmingDelete(false)}>
+            <Text style={styles.rowLabel}>Cancel</Text>
+            <Text style={styles.rowDetail}>Keep this session</Text>
+          </Pressable>
+        ) : null}
+
         <Text style={styles.sectionTitle}>Appearance</Text>
         <View style={styles.infoCard}>
           <Text style={styles.cardLabel}>OpenCode dark</Text>
@@ -94,6 +153,7 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: palette.background },
   screen: { flex: 1, backgroundColor: palette.background },
   content: { gap: 8, padding: 12, paddingBottom: 24 },
+  disabledRow: { opacity: 0.5 },
   sectionTitle: { marginTop: 6, fontSize: 12, fontWeight: '800', textTransform: 'uppercase', color: palette.textMuted },
   infoCard: { gap: 3, padding: 11, borderWidth: 1, borderColor: palette.borderSubtle, backgroundColor: palette.panel },
   cardLabel: { fontSize: 15, fontWeight: '700', color: palette.text },

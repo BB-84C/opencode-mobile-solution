@@ -80,6 +80,29 @@ macOS 上 `/tmp` 是 `/private/tmp` 的符号链接，服务端保存的是**解
 `--target` 注册一个**已经在跑**的后端而不接管它，所以影子栈和正式栈可以共用同一个后端进程——
 relay 对后端而言只是又一个 HTTP 客户端。`--backend-env` 只读复用现有凭据，不复制密钥文件。
 
+### 在主机上挂到共用的那个后端
+
+直接敲 `opencode` 会在本机另起一个进程，它有自己的会话库，手机上看不到。
+`opencode-shared` 改成 attach 到主机正在跑的那个后端，于是主机、手机、
+以及配对过的分机看到的是同一份会话列表。
+
+```bash
+install -m 755 host/opencode-shared ~/.local/bin/opencode-shared
+
+opencode-shared                      # 当前目录
+opencode-shared -c                   # 续上一个会话
+opencode-shared -s ses_xxx           # 指定会话
+opencode-shared --dir /path/to/proj  # 指定目录
+```
+
+参数原样透传给 `opencode attach`。凭据从 `backend.env` 读进环境变量，
+不出现在命令行上，所以不会进 `ps` 和 shell 历史。
+
+不显式给 `--dir` 时它会补上当前目录。后端按工作目录给会话分域，
+不指定的话会落到服务进程自己的目录下，那时看到的会话列表和你以为的项目对不上。
+
+后端没起来时它会直接说明并退出，而不是让 attach 抛一段看不懂的连接错误。
+
 ### 拆掉
 
 ```bash

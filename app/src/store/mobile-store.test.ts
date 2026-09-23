@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { EventSubscriptionOptions } from '@/src/opencode/client';
+import type { ServerEvent } from '@/src/opencode/sse';
 import type { HostConnection, MachineExecutionContract, Session } from '@/src/opencode/types';
 
 vi.mock('./connection-storage', () => ({
@@ -118,7 +120,11 @@ describe('mobile store composite relay contract', () => {
           cursor: {},
         });
       }
-      if (url.endsWith('/session/status')) {
+      if (url.endsWith('/session/status')) return jsonResponse({});
+      if (url.includes('/session/status?')) {
+        const expectedDirectory = target === 'mac' ? '/repo' : 'D:/repo';
+        expect(new URL(url).searchParams.get('directory')).toBe(expectedDirectory);
+        expect(new Headers(init?.headers).get('X-OpenCode-Directory')).toBe(expectedDirectory);
         return jsonResponse({ same: { type: target === 'mac' ? 'busy' : 'idle' } });
       }
       throw new Error(`unexpected request ${url}`);
@@ -176,7 +182,7 @@ describe('mobile store composite relay contract', () => {
           cursor: {},
         });
       }
-      if (url.endsWith('/session/status')) return jsonResponse({});
+      if (new URL(url).pathname === '/session/status') return jsonResponse({});
       throw new Error(`unexpected request ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -193,6 +199,237 @@ describe('mobile store composite relay contract', () => {
       relayTargetName: 'Woody',
     });
     expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/api/session?'))).toHaveLength(2);
+  });
+
+  it('reads each directory once without a tunnel burst and retains status only for failed scopes', async () => {
+    const sessions: Session[] = [
+      { id: 'active', location: { directory: 'D:\\RL-Science-Trajectory' } },
+      { id: 'finished', location: { directory: 'D:\\RL-Science-Trajectory' } },
+      { id: 'unreachable', directory: 'D:\\missing' },
+      { id: 'legacy' },
+    ];
+    const scopes: Array<string | null> = [];
+    let pending = 0;
+    let maxPending = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/api/pairing/me') return jsonResponse({ device: { clientID: 'phone' } });
+      if (url.pathname === '/relay/targets') return jsonResponse({ targets: [{ id: 'windows', name: 'Windows' }] });
+      expect(new Headers(init?.headers).get('X-OpenCode-Target')).toBe('windows');
+      if (url.pathname === '/global/health') return jsonResponse({ healthy: true, version: '1.18.31' });
+      if (url.pathname === '/api/session') return jsonResponse({ data: sessions, cursor: {} });
+      if (url.pathname === '/session/status') {
+        const directory = url.searchParams.get('directory');
+        expect(new Headers(init?.headers).get('X-OpenCode-Directory')).toBe(directory);
+        scopes.push(directory);
+        maxPending = Math.max(maxPending, ++pending);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        pending -= 1;
+        if (directory === 'D:\\missing') return jsonResponse({ error: 'unavailable directory' }, 403);
+        if (!directory) return jsonResponse({ legacy: { running: true }, active: { type: 'idle' } });
+        return jsonResponse({ active: { type: 'busy' } });
+      }
+      throw new Error(`unexpected request ${url}`);
+    }));
+    const { sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+    const key = (sessionId: string) => sessionStateKey({ connectionId: host.id, relayTargetID: 'windows', sessionId });
+    useOpenCodeMobileStore.setState({
+      connections: [host], activeConnectionId: host.id,
+      sessionStatuses: { [key('finished')]: { type: 'busy' }, [key('unreachable')]: { type: 'busy' } },
+    });
+
+    await useOpenCodeMobileStore.getState().refreshActiveHost();
+
+    expect(scopes).toHaveLength(3);
+    expect(scopes).toEqual(expect.arrayContaining(['D:\\RL-Science-Trajectory', 'D:\\missing', null]));
+    expect(maxPending).toBe(1);
+    expect(useOpenCodeMobileStore.getState().sessionStatuses).toMatchObject({
+      [key('active')]: { type: 'busy' }, [key('finished')]: { type: 'idle' },
+      [key('unreachable')]: { type: 'busy' }, [key('legacy')]: { running: true },
+    });
+    expect(useOpenCodeMobileStore.getState().hostSyncErrors[host.id]).toContain('running-state checks failed for 1 project directory');
+    expect(useOpenCodeMobileStore.getState().sessions[host.id]).toHaveLength(4);
+  });
+
+  it('loads an already-running Windows session without waiting for a new SSE status event', async () => {
+    const directory = 'D:\\RL-Science-Trajectory';
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      expect(new Headers(init?.headers).get('X-OpenCode-Target')).toBe('windows');
+      if (url.pathname === '/session/active/message') return jsonResponse([]);
+      if (url.pathname === '/session/status') {
+        expect(url.searchParams.get('directory')).toBe(directory);
+        expect(new Headers(init?.headers).get('X-OpenCode-Directory')).toBe(directory);
+        return jsonResponse({ active: { type: 'busy' } });
+      }
+      return jsonResponse({ error: 'optional endpoint unavailable' }, 400);
+    }));
+    const { sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+    const ref = { connectionId: host.id, relayTargetID: 'windows', sessionId: 'active' };
+    useOpenCodeMobileStore.setState({
+      connections: [host], activeConnectionId: host.id,
+      sessions: { [host.id]: [{ id: 'active', relayTargetID: 'windows', location: { directory } }] },
+    });
+
+    await useOpenCodeMobileStore.getState().openSession(ref);
+
+    expect(useOpenCodeMobileStore.getState().sessionStatuses[sessionStateKey(ref)]).toEqual({ type: 'busy' });
+  });
+
+  it('publishes the index before slow historical status reads, coalesces syncs, and bounds the status phase', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        const target = new Headers(init?.headers).get('X-OpenCode-Target');
+        if (url.pathname === '/api/pairing/me') return jsonResponse({ device: { clientID: 'phone' } });
+        if (url.pathname === '/relay/targets') return jsonResponse({ targets: [{ id: 'mac', name: 'Mac' }, { id: 'windows', name: 'Windows' }] });
+        if (url.pathname === '/global/health') return jsonResponse({ healthy: true });
+        if (url.pathname === '/api/session') return jsonResponse({
+          data: target === 'mac'
+            ? Array.from({ length: 5 }, (_, index) => ({ id: `old-${index}`, directory: `/old/${index}` }))
+            : [{ id: 'active', directory: 'D:\\repo' }],
+          cursor: {},
+        });
+        if (url.pathname === '/session/status' && target === 'windows') return jsonResponse({ active: { type: 'busy' } });
+        // Model a native request/body which ignores cancellation entirely.
+        if (url.pathname === '/session/status') return new Promise<Response>(() => {});
+        throw new Error(`unexpected request ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const { sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+      useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id });
+      const start = Date.now();
+      let finished = false;
+      const first = useOpenCodeMobileStore.getState().refreshActiveHost().then(() => { finished = true; });
+      const second = useOpenCodeMobileStore.getState().refreshActiveHost();
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useOpenCodeMobileStore.getState().sessions[host.id]).toHaveLength(6);
+      expect(useOpenCodeMobileStore.getState().loading).toBe('idle');
+      expect(finished).toBe(false);
+      expect(useOpenCodeMobileStore.getState().sessionStatuses[sessionStateKey({ connectionId: host.id, relayTargetID: 'windows', sessionId: 'active' })]).toEqual({ type: 'busy' });
+      expect(fetchMock.mock.calls.filter(([input]) => new URL(String(input)).pathname === '/api/session')).toHaveLength(2);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await Promise.all([first, second]);
+      expect(Date.now() - start).toBe(10_000);
+      expect(finished).toBe(true);
+      const statusCalls = fetchMock.mock.calls.filter(([input, init]) => new URL(String(input)).pathname === '/session/status' && new Headers(init?.headers).get('X-OpenCode-Target') === 'mac');
+      expect(statusCalls).toHaveLength(4);
+      expect(statusCalls.every(([, init]) => init?.signal?.aborted)).toBe(true);
+      expect(useOpenCodeMobileStore.getState().hostSyncErrors[host.id]).toBe('Sync incomplete: Mac: running-state checks failed for 3 project directories');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([0, 31_000])('continues unchecked directories after a %i ms gap without treating expired snapshots as unfinished discovery', async (gap) => {
+    vi.useFakeTimers();
+    try {
+      const scopes: string[] = [];
+      vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        if (url.pathname === '/api/pairing/me') return jsonResponse({ device: { clientID: 'phone' } });
+        if (url.pathname === '/relay/targets') return jsonResponse({ targets: [{ id: 'windows', name: 'Woody' }] });
+        if (url.pathname === '/global/health') return jsonResponse({ healthy: true });
+        if (url.pathname === '/api/session') return jsonResponse({ data: Array.from({ length: 76 }, (_, i) => ({ id: `s${i}`, directory: `D:/${i}` })), cursor: {} });
+        if (url.pathname === '/session/status') { scopes.push(url.searchParams.get('directory')!); return jsonResponse({}); }
+        throw new Error(`unexpected request ${url}`);
+      }));
+      const { useOpenCodeMobileStore } = await import('./mobile-store');
+      useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id });
+      const first = useOpenCodeMobileStore.getState().refreshActiveHost();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await first;
+      expect(scopes.length).toBeLessThan(76);
+      expect(useOpenCodeMobileStore.getState().hostSyncErrors[host.id]).toBeNull();
+      expect(useOpenCodeMobileStore.getState().hostSyncNotes[host.id]).toContain('awaiting their first running-state check');
+      const firstScopes = [...scopes];
+      await vi.advanceTimersByTimeAsync(gap);
+      const second = useOpenCodeMobileStore.getState().refreshActiveHost();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await second;
+      if (gap === 0) expect(scopes).toHaveLength(76);
+      expect(scopes.slice(firstScopes.length, 76).every((scope) => !firstScopes.includes(scope))).toBe(true);
+      expect(new Set(scopes).size).toBe(76);
+      expect(useOpenCodeMobileStore.getState().hostSyncErrors[host.id]).toBeNull();
+      if (gap === 0) expect(useOpenCodeMobileStore.getState().hostSyncNotes[host.id]).toBeNull();
+      else expect(useOpenCodeMobileStore.getState().hostSyncNotes[host.id]).toBe('Woody: showing previously checked running states');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('preserves a live status event received while the directory snapshot is in flight', async () => {
+    const statusResponse = deferred<Response>();
+    let statusRequested = false;
+    const { OpenCodeClient } = await import('@/src/opencode/client');
+    let emit!: (event: ServerEvent) => void;
+    vi.spyOn(OpenCodeClient.prototype, 'subscribeEvents').mockImplementation((handler) => {
+      emit = handler;
+      return () => undefined;
+    });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/api/pairing/me') return jsonResponse({ device: { clientID: 'phone' } });
+      if (url.pathname === '/relay/targets') return jsonResponse({ targets: [{ id: 'windows', name: 'Windows' }] });
+      if (url.pathname === '/global/health') return jsonResponse({ healthy: true, version: '1.18.31' });
+      if (url.pathname === '/api/session') return jsonResponse({ data: [{ id: 'active', directory: 'D:\\repo' }], cursor: {} });
+      if (url.pathname === '/session/status') { statusRequested = true; return statusResponse.promise; }
+      throw new Error(`unexpected request ${url}`);
+    }));
+    const { sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+    const ref = { connectionId: host.id, relayTargetID: 'windows', sessionId: 'active' };
+    const key = sessionStateKey(ref);
+    useOpenCodeMobileStore.setState({
+      connections: [host], activeConnectionId: host.id, activeSessionRef: ref, activeSessionKey: key,
+      sessions: { [host.id]: [{ id: 'active', relayTargetID: 'windows', directory: 'D:\\repo' }] },
+    });
+    useOpenCodeMobileStore.getState().subscribeToActiveHost();
+    const refresh = useOpenCodeMobileStore.getState().refreshActiveHost();
+    await eventually(() => expect(statusRequested).toBe(true));
+    emit({ type: 'session.status', properties: { sessionID: 'active', status: { type: 'busy' } } });
+    statusResponse.resolve(jsonResponse({}));
+    await refresh;
+
+    expect(useOpenCodeMobileStore.getState().sessionStatuses[key]).toEqual({ type: 'busy' });
+    useOpenCodeMobileStore.getState().unsubscribeFromHost(host.id);
+  });
+
+  it('reconciles the active directory on reconnect and clears a completed session without clearing another target', async () => {
+    const { OpenCodeClient } = await import('@/src/opencode/client');
+    let reconnect: EventSubscriptionOptions['onReconnect'];
+    vi.spyOn(OpenCodeClient.prototype, 'subscribeEvents').mockImplementation((_handler, options) => {
+      reconnect = options?.onReconnect;
+      return () => undefined;
+    });
+    const statusRead = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      expect(new Headers(init?.headers).get('X-OpenCode-Target')).toBe('windows');
+      if (url.pathname === '/session/status') {
+        expect(url.searchParams.get('directory')).toBe('D:\\repo');
+        return jsonResponse({});
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', statusRead);
+    const { sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+    const ref = { connectionId: host.id, relayTargetID: 'windows', sessionId: 'active' };
+    const key = sessionStateKey(ref);
+    const macKey = sessionStateKey({ ...ref, relayTargetID: 'mac' });
+    useOpenCodeMobileStore.setState({
+      connections: [host], activeConnectionId: host.id, activeSessionRef: ref, activeSessionKey: key,
+      sessions: { [host.id]: [{ id: 'active', relayTargetID: 'windows', directory: 'D:\\repo' }] },
+      sessionStatuses: { [key]: { type: 'busy' }, [macKey]: { type: 'busy' } },
+      refreshActiveHost: vi.fn(async () => undefined),
+    });
+    useOpenCodeMobileStore.getState().subscribeToActiveHost();
+
+    await reconnect?.();
+
+    expect(statusRead.mock.calls.some(([input]) => new URL(String(input)).pathname === '/session/status')).toBe(true);
+    expect(useOpenCodeMobileStore.getState().sessionStatuses[key]).toEqual({ type: 'idle' });
+    expect(useOpenCodeMobileStore.getState().sessionStatuses[macKey]).toEqual({ type: 'busy' });
+    useOpenCodeMobileStore.getState().unsubscribeFromHost(host.id);
   });
 
   it('does not fall through to a relay default target when the authorized target list is empty', async () => {
@@ -251,7 +488,7 @@ describe('mobile store composite relay contract', () => {
       if (url.endsWith('/api/session?limit=1000')) {
         return jsonResponse({ data: [{ id: 'mac-live', relayTargetID: 'mac', directory: '/repo' }], cursor: {} });
       }
-      if (url.endsWith('/session/status')) return jsonResponse({});
+      if (new URL(url).pathname === '/session/status') return jsonResponse({});
       throw new Error(`unexpected request ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -757,11 +994,108 @@ describe('mobile store composite relay contract', () => {
       'POST /session/session-1/summarize',
       'POST /session/session-1/revert',
       'POST /session/session-1/unrevert',
-      'POST /session/session-1/permissions/permission-1',
+      'POST /permission/permission-1/reply',
       'POST /question/question-1/reply',
       'POST /question/question-2/reject',
     ]));
     expect(routedMutations.some((entry) => entry.endsWith('/session/session-1/fork'))).toBe(false);
+  });
+
+  it('publishes an already-pending permission before slow optional services and isolates same-ID machines', async () => {
+    const { OpenCodeClient } = await import('@/src/opencode/client');
+    const optional = deferred<any>();
+    vi.spyOn(OpenCodeClient.prototype, 'getLspStatus').mockReturnValue(optional.promise);
+    const permission = { id: 'per_gate', sessionID: 'same', permission: 'external_directory', patterns: ['/etc/*'], metadata: { command: 'cat /etc/hosts' }, always: ['/etc/*'] };
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/permission') {
+        expect(new Headers(init?.headers).get('X-OpenCode-Target')).toBe('mac');
+        expect(url.searchParams.get('directory')).toBe('/Users/test');
+        return jsonResponse([permission, { ...permission, id: 'per_other', sessionID: 'other' }]);
+      }
+      return jsonResponse({ error: 'optional unavailable' }, 400);
+    }));
+    const { sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+    const ref = { connectionId: host.id, relayTargetID: 'mac', sessionId: 'same' };
+    const key = sessionStateKey(ref);
+    const windowsKey = sessionStateKey({ ...ref, relayTargetID: 'windows' });
+    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id,
+      sessions: { [host.id]: [{ id: 'same', relayTargetID: 'mac', directory: '/Users/test' }] },
+      permissions: { [windowsKey]: [{ ...permission, id: 'per_windows' }] },
+    });
+    const loading = useOpenCodeMobileStore.getState().openSession(ref);
+    await eventually(() => expect(useOpenCodeMobileStore.getState().permissions[key]).toEqual([permission]));
+    expect(useOpenCodeMobileStore.getState().sessionLoadStates[key]).toBe('loading');
+    expect(useOpenCodeMobileStore.getState().permissions[windowsKey][0].id).toBe('per_windows');
+    optional.resolve([]);
+    await loading;
+  });
+
+  it('deduplicates live permission gates and never resurrects a replied gate from an older REST read', async () => {
+    const { OpenCodeClient } = await import('@/src/opencode/client');
+    let emit!: (event: ServerEvent) => void;
+    vi.spyOn(OpenCodeClient.prototype, 'subscribeEvents').mockImplementation((handler) => { emit = handler; return () => undefined; });
+    const response = deferred<any>();
+    vi.spyOn(OpenCodeClient.prototype, 'listPermissions').mockReturnValue(response.promise);
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: 'optional unavailable' }, 400)));
+    const { sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+    const ref = { connectionId: host.id, relayTargetID: 'mac', sessionId: 'same' };
+    const key = sessionStateKey(ref);
+    const permission = { id: 'per_gate', sessionID: 'same', permission: 'external_directory', patterns: ['/etc/*'], metadata: {}, always: ['/etc/*'] };
+    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id,
+      sessions: { [host.id]: [{ id: 'same', relayTargetID: 'mac', directory: '/repo' }] },
+    });
+    const loading = useOpenCodeMobileStore.getState().openSession(ref);
+    useOpenCodeMobileStore.getState().subscribeToActiveHost();
+    emit({ type: 'permission.asked', properties: permission });
+    emit({ type: 'permission.asked', properties: permission });
+    expect(useOpenCodeMobileStore.getState().permissions[key]).toHaveLength(1);
+    emit({ type: 'permission.replied', properties: { sessionID: 'same', requestID: 'per_gate', reply: 'once' } });
+    response.resolve([permission]);
+    await loading;
+    expect(useOpenCodeMobileStore.getState().permissions[key]).toEqual([]);
+    useOpenCodeMobileStore.getState().unsubscribeFromHost(host.id);
+  });
+
+  it('keeps failed permission decisions pending and removes them only after successful submission', async () => {
+    const { OpenCodeClient } = await import('@/src/opencode/client');
+    const reply = vi.spyOn(OpenCodeClient.prototype, 'respondToPermission').mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(undefined);
+    const { sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+    const ref = { connectionId: host.id, relayTargetID: 'windows', sessionId: 'same' };
+    const key = sessionStateKey(ref);
+    const request = { id: 'per_gate', sessionID: 'same', permission: 'read', patterns: ['C:/outside/*'], metadata: {}, always: [] };
+    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id,
+      sessions: { [host.id]: [{ id: 'same', relayTargetID: 'windows', directory: 'D:/repo', workspaceID: 'ws_1' }] },
+      permissions: { [key]: [request] },
+    });
+    await expect(useOpenCodeMobileStore.getState().respondToPermission(ref, request.id, 'reject', 'Stay inside')).rejects.toThrow('offline');
+    expect(useOpenCodeMobileStore.getState().permissions[key]).toEqual([request]);
+    await useOpenCodeMobileStore.getState().respondToPermission(ref, request.id, 'reject', 'Stay inside');
+    expect(reply).toHaveBeenLastCalledWith('same', 'per_gate', { reply: 'reject', message: 'Stay inside' }, { directory: 'D:/repo', workspace: 'ws_1' });
+    expect(useOpenCodeMobileStore.getState().permissions[key]).toEqual([]);
+  });
+
+  it('reconciles missed permission gates on reconnect without waiting for host status synchronization', async () => {
+    const { OpenCodeClient } = await import('@/src/opencode/client');
+    let reconnect: EventSubscriptionOptions['onReconnect'];
+    vi.spyOn(OpenCodeClient.prototype, 'subscribeEvents').mockImplementation((_handler, options) => { reconnect = options?.onReconnect; return () => undefined; });
+    const request = { id: 'per_gate', sessionID: 'same', permission: 'read', patterns: ['/etc/*'], metadata: {}, always: [] };
+    vi.spyOn(OpenCodeClient.prototype, 'listPermissions').mockResolvedValue([request]);
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: 'optional unavailable' }, 400)));
+    const { sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+    const ref = { connectionId: host.id, relayTargetID: 'mac', sessionId: 'same' };
+    const key = sessionStateKey(ref);
+    const sync = deferred<void>();
+    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id, activeSessionRef: ref, activeSessionKey: key,
+      sessions: { [host.id]: [{ id: 'same', relayTargetID: 'mac', directory: '/repo' }] },
+      refreshActiveHost: vi.fn(() => sync.promise),
+    });
+    useOpenCodeMobileStore.getState().subscribeToActiveHost();
+    const reconciliation = reconnect?.();
+    await eventually(() => expect(useOpenCodeMobileStore.getState().permissions[key]).toEqual([request]));
+    sync.resolve();
+    await reconciliation;
+    useOpenCodeMobileStore.getState().unsubscribeFromHost(host.id);
   });
 
   it('refuses ambiguous bare session IDs instead of guessing a relay machine', async () => {

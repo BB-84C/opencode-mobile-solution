@@ -24,6 +24,8 @@ const mocks = vi.hoisted(() => ({
     loading: 'idle',
     error: null,
     hostSyncErrors: {} as Record<string, string | null>,
+    hostSyncStates: {} as Record<string, string>,
+    hostSyncNotes: {} as Record<string, string | null>,
     clearActiveConnection: vi.fn(),
     refreshActiveHost: vi.fn(async () => undefined),
     subscribeToActiveHost: vi.fn(),
@@ -84,6 +86,8 @@ describe('SessionsScreen', () => {
     mocks.state.loading = 'idle';
     mocks.state.error = null;
     mocks.state.hostSyncErrors = {};
+    mocks.state.hostSyncStates = {};
+    mocks.state.hostSyncNotes = {};
     mocks.state.clearActiveConnection.mockReset();
     mocks.state.refreshActiveHost.mockReset();
     mocks.state.refreshActiveHost.mockResolvedValue(undefined);
@@ -98,6 +102,14 @@ describe('SessionsScreen', () => {
     expect(text(screen)).toContain('3 existing sessions');
     expect(text(screen)).not.toContain('Child hidden at root');
     expect(text(screen)).not.toContain('Orphan child must stay hidden');
+  });
+
+  it('shows deferred status work as progress rather than a synchronization failure', async () => {
+    mocks.state.hostSyncNotes.relay = 'Woody: 57 project directories awaiting their first running-state check';
+    const screen = await renderScreen();
+    expect(find(screen, 'sessions-status-note')).toBeTruthy();
+    expect(all(screen, 'sessions-load-error')).toHaveLength(0);
+    expect(text(screen)).toContain('Refresh to continue');
   });
 
   it('renders root sessions newest first and filters locally across machines', async () => {
@@ -138,6 +150,18 @@ describe('SessionsScreen', () => {
     expect(find(screen, 'sessions-load-error')).toBeTruthy();
     expect(text(screen)).toContain('Sync warning · Windows target timed out');
     expect(text(screen)).toContain('Newest Mac');
+  });
+
+  it('does not label sessions idle before their running state has been fetched', async () => {
+    mocks.state.hostSyncStates = { relay: 'loading' };
+    const screen = await renderScreen();
+    expect(text(screen)).toContain('CHECKING');
+    expect(text(screen)).not.toContain('IDLE');
+    mocks.state.hostSyncStates = { relay: 'error' };
+    await act(async () => { screen.update(<SessionsScreen />); });
+    expect(text(screen)).toContain('UNKNOWN');
+    expect(text(screen)).not.toContain('CHECKING');
+    expect(text(screen)).not.toContain('IDLE');
   });
 
   it('clears a stale active relay only from an effect', async () => {

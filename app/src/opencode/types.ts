@@ -298,10 +298,18 @@ export interface TodoItem {
 }
 
 export interface PermissionReply {
-  response?: boolean;
-  remember?: boolean;
-  reply?: 'once' | 'always' | 'reject';
+  reply: 'once' | 'always' | 'reject';
   message?: string;
+}
+
+export interface PermissionRequest {
+  id: string;
+  sessionID: string;
+  permission: string;
+  patterns: string[];
+  metadata: Record<string, unknown>;
+  always: string[];
+  tool?: { messageID: string; callID: string };
 }
 
 export interface QuestionReplyBody {

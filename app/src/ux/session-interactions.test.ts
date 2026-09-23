@@ -42,12 +42,10 @@ describe('session TUI interaction model', () => {
   });
 
   it('maps permission actions to OpenCode API replies including reject guidance', () => {
-    expect(createPermissionReply('allow-once')).toEqual({ reply: 'once', response: true, remember: false });
-    expect(createPermissionReply('allow-always')).toEqual({ reply: 'always', response: true, remember: true });
+    expect(createPermissionReply('allow-once')).toEqual({ reply: 'once' });
+    expect(createPermissionReply('allow-always')).toEqual({ reply: 'always' });
     expect(createPermissionReply('reject', 'Use a safer command')).toEqual({
       reply: 'reject',
-      response: false,
-      remember: false,
       message: 'Use a safer command',
     });
   });

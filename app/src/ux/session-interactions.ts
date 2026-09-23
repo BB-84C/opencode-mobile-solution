@@ -34,13 +34,11 @@ export function getPermissionActions(): Array<{ id: PermissionActionId; label: s
 }
 
 export function createPermissionReply(action: PermissionActionId, message?: string): PermissionReply {
-  if (action === 'allow-once') return { reply: 'once', response: true, remember: false };
-  if (action === 'allow-always') return { reply: 'always', response: true, remember: true };
+  if (action === 'allow-once') return { reply: 'once' };
+  if (action === 'allow-always') return { reply: 'always' };
   const trimmed = message?.trim();
   return {
     reply: 'reject',
-    response: false,
-    remember: false,
     ...(trimmed ? { message: trimmed } : {}),
   };
 }

@@ -30,6 +30,8 @@ export default function SessionsScreen() {
     loading,
     error,
     hostSyncErrors,
+    hostSyncNotes,
+    hostSyncStates,
     clearActiveConnection,
     refreshActiveHost,
     subscribeToActiveHost,
@@ -44,6 +46,8 @@ export default function SessionsScreen() {
     loading: state.loading,
     error: state.error,
     hostSyncErrors: state.hostSyncErrors,
+    hostSyncNotes: state.hostSyncNotes,
+    hostSyncStates: state.hostSyncStates,
     clearActiveConnection: state.clearActiveConnection,
     refreshActiveHost: state.refreshActiveHost,
     subscribeToActiveHost: state.subscribeToActiveHost,
@@ -61,6 +65,7 @@ export default function SessionsScreen() {
   const activeSessions = activeConnectionId ? sessions[activeConnectionId] ?? [] : [];
   const syncError = activeConnectionId ? hostSyncErrors[activeConnectionId] ?? error : error;
   const statuses = sessionStatuses;
+  const checkingStatuses = Boolean(activeConnectionId && hostSyncStates?.[activeConnectionId] === 'loading');
   const rootSessions = useMemo(() => filterAndSortRootSessions(activeSessions), [activeSessions]);
   const machines = useMemo(() => machineChoices(rootSessions), [rootSessions]);
   const visibleSessions = useMemo(
@@ -111,6 +116,7 @@ export default function SessionsScreen() {
     const key = sessionKey(ref);
     const status = statuses[key];
     const busy = isBusy(status);
+    const statusLabel = status ? (busy ? 'RUNNING' : 'IDLE') : (checkingStatuses ? 'CHECKING' : 'UNKNOWN');
     const opening = openingKey === key;
     return (
       <Pressable
@@ -124,7 +130,7 @@ export default function SessionsScreen() {
         <View style={styles.sessionTop}>
           <Text numberOfLines={2} style={styles.sessionTitle}>{item.title || 'Untitled session'}</Text>
           {opening ? <ActivityIndicator testID={`session-opening-${key}`} size="small" color={palette.primary} /> : (
-            <Text style={[styles.status, busy ? styles.busy : styles.idle]}>{busy ? 'RUNNING' : 'IDLE'}</Text>
+            <Text style={[styles.status, busy ? styles.busy : styles.idle]}>{statusLabel}</Text>
           )}
         </View>
         <Text numberOfLines={1} style={styles.machine}>{item.relayTargetName ?? item.relayTargetID ?? active?.name}</Text>
@@ -132,7 +138,7 @@ export default function SessionsScreen() {
         <Text style={styles.updated}>{formatUpdated(sessionUpdatedAt(item))}</Text>
       </Pressable>
     );
-  }, [active?.name, activeConnectionId, openSession, openingKey, statuses]);
+  }, [active?.name, activeConnectionId, checkingStatuses, openSession, openingKey, statuses]);
 
   if (hydrated && !active) {
     return (
@@ -246,6 +252,11 @@ export default function SessionsScreen() {
               </Text>
             ) : null}
             {actionError ? <Text selectable testID="sessions-action-error" style={styles.error}>{actionError}</Text> : null}
+            {activeConnectionId && hostSyncNotes?.[activeConnectionId] ? (
+              <Text selectable testID="sessions-status-note" style={styles.statusNote}>
+                {hostSyncNotes[activeConnectionId]}. Refresh to continue, or open a session to check it now.
+              </Text>
+            ) : null}
             <Text testID="sessions-result-count" style={styles.resultCount}>
               {visibleSessions.length} existing session{visibleSessions.length === 1 ? '' : 's'} · newest activity first
             </Text>
@@ -353,6 +364,7 @@ const styles = StyleSheet.create({
   centerState: { flex: 1, minHeight: 220, alignItems: 'center', justifyContent: 'center', gap: 8, padding: 20 },
   emptyScreen: { flex: 1, justifyContent: 'center', gap: 8, padding: 24, backgroundColor: palette.background },
   error: { padding: 8, borderWidth: 1, borderColor: palette.error, borderRadius: 8, color: palette.error },
+  statusNote: { fontSize: 11, lineHeight: 16, color: palette.textMuted },
   navigationBlocker: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center', gap: 9, backgroundColor: palette.scrim },
   blockerText: { fontSize: 13, fontWeight: '800', color: palette.text },
 });

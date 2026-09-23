@@ -1,6 +1,7 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { PermissionRequest } from '@/src/opencode/types';
 import SessionScreen from '@/app/session/[sessionKey]';
 import { encodeSessionRouteKey } from '@/src/ux/session-forest';
 
@@ -48,6 +49,8 @@ const mocks = vi.hoisted(() => ({
     olderMessageLoadStates: {} as Record<string, 'idle' | 'loading' | 'error'>,
     olderMessageErrors: {} as Record<string, string | null>,
     questions: {},
+    permissions: {} as Record<string, PermissionRequest[]>,
+    permissionErrors: {},
     sessionLoadStates: { [JSON.stringify(['relay', 'mac', 'root'])]: 'idle' },
     sessionErrors: {},
     eventConnectionStates: { [JSON.stringify(['relay', 'mac', 'root'])]: 'live' },
@@ -217,6 +220,8 @@ describe('SessionScreen composite route', () => {
     mocks.state.activeSessionKey = rootKey;
     mocks.state.sessionLoadStates = { [rootKey]: 'idle' };
     mocks.state.sessionErrors = {};
+    mocks.state.permissions = {};
+    mocks.state.respondToPermission.mockClear();
     mocks.state.eventConnectionStates = { [rootKey]: 'live' };
     mocks.state.contractLoadStates = {
       [scopeKey]: { status: 'fresh', attemptedAt: 'now', verifiedAt: 'now', error: null },
@@ -335,6 +340,17 @@ describe('SessionScreen composite route', () => {
     await act(async () => find(screen, 'session-prompt-input').props.onChangeText('continue existing')); 
     await act(async () => find(screen, 'send-prompt-button').props.onPress());
     expect(mocks.state.sendPrompt).toHaveBeenCalledWith('continue existing');
+  });
+
+  it('surfaces a standalone permission without a transcript permission part and blocks prompt dispatch', async () => {
+    mocks.state.permissions[rootKey] = [{ id: 'per_gate', sessionID: 'root', permission: 'external_directory', patterns: ['/etc/*'], metadata: { command: 'cat /etc/hosts' }, always: ['/etc/*'] }];
+    const screen = await renderScreen();
+    expect(text(screen)).toContain('cat /etc/hosts');
+    expect(text(screen)).toContain('/etc/*');
+    await act(async () => find(screen, 'session-prompt-input').props.onChangeText('continue'));
+    expect(find(screen, 'send-prompt-button').props.disabled).toBe(true);
+    await act(async () => find(screen, 'permission-request-per_gate-allow-once').props.onPress());
+    expect(mocks.state.respondToPermission).toHaveBeenCalledWith(rootRef, 'per_gate', 'allow-once', undefined);
   });
 
   it('renders the complete conversation component at arbitrary depth', async () => {

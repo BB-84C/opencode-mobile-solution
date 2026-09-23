@@ -5,6 +5,7 @@ import {
   DEFAULT_MESSAGE_PAGE_LIMIT,
   OpenCodeClient,
   OpenCodeRequestError,
+  type RequestPolicy,
 } from '@/src/opencode/client';
 import {
   flattenConfiguredModels,
@@ -27,6 +28,7 @@ import type {
   MessagePart,
   MessageWithParts,
   ModelRef,
+  PermissionRequest,
   PromptDispatchOptions,
   PromptSelection,
   ProjectGroup,
@@ -148,6 +150,8 @@ export interface MobileStore {
   activeAgentByHost: Record<string, string>;
   activeVariant?: string;
   questions: Record<string, QuestionRequest[]>;
+  permissions: Record<string, PermissionRequest[]>;
+  permissionErrors: Record<string, string | null>;
   diffs: Record<string, FileDiff[]>;
   loading: LoadingState;
   error: string | null;
@@ -157,6 +161,7 @@ export interface MobileStore {
   commandPaletteOpen: boolean;
   hostSyncStates: Record<string, LoadingState>;
   hostSyncErrors: Record<string, string | null>;
+  hostSyncNotes: Record<string, string | null>;
   interruptArmedAt: Record<string, number>;
   /** Legacy four-level display state; dynamic variants live in sessionSelections. */
   thinkingLevel: ThinkingLevel;
@@ -245,6 +250,11 @@ const openSessionFlights = new Map<string, Promise<void>>();
 const olderMessageFlights = new Map<string, Promise<void>>();
 const latestOpenGeneration = new Map<string, number>();
 const latestRefreshGeneration = new Map<string, number>();
+const hostRefreshFlights = new Map<string, Promise<void>>();
+const permissionReads = new Map<string, number>();
+const statusScopeChecks = new Map<string, Map<string, { attemptedAt: number; failed: boolean }>>();
+const sessionStatusRequestTimeoutMs = 3_000;
+const sessionStatusSyncBudgetMs = 10_000;
 
 type CachePersistenceSnapshot =
   | {
@@ -300,6 +310,9 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
   activeAgentByHost: {},
   activeVariant: undefined,
   questions: {},
+  permissions: {},
+  permissionErrors: {},
+  hostSyncNotes: {},
   diffs: {},
   loading: 'idle',
   error: null,
@@ -483,6 +496,8 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
         lspStatuses: omitCompositeConnection(state.lspStatuses, id),
         mcpStatuses: omitCompositeConnection(state.mcpStatuses, id),
         questions: omitCompositeConnection(state.questions, id),
+        permissions: omitCompositeConnection(state.permissions, id),
+        permissionErrors: omitCompositeConnection(state.permissionErrors, id),
         sessionSelections: omitCompositeConnection(state.sessionSelections, id),
         sessionLoadStates: omitCompositeConnection(state.sessionLoadStates, id),
         sessionErrors: omitCompositeConnection(state.sessionErrors, id),
@@ -492,6 +507,7 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
         commands: omitScopeConnection(state.commands, id),
         hostSyncStates: omitRecordKey(state.hostSyncStates, id),
         hostSyncErrors: omitRecordKey(state.hostSyncErrors, id),
+        hostSyncNotes: omitRecordKey(state.hostSyncNotes, id),
         ...(wasActive
           ? {
               activeConnectionId: null,
@@ -558,102 +574,13 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
   async refreshActiveHost(options = {}) {
     const connection = activeConnection(get());
     if (!connection) return;
-    const generation = ++refreshGeneration;
-    latestRefreshGeneration.set(connection.id, generation);
-    set((state) => ({
-      hostSyncStates: { ...state.hostSyncStates, [connection.id]: 'loading' },
-      hostSyncErrors: { ...state.hostSyncErrors, [connection.id]: null },
-      ...(!options.background ? { loading: 'loading' as const, error: null } : {}),
-    }));
-
-    try {
-      const baseClient = clientFor(connection);
-      const [identityResult, targetResult] = await Promise.allSettled([
-        connection.authType === 'bearer' ? baseClient.getRelayDeviceIdentity() : Promise.resolve(undefined),
-        baseClient.listRelayTargets(),
-      ]);
-      const targets = targetResult.status === 'fulfilled'
-        ? normalizeTargets(targetResult.value)
-        : targetListFailureFallback(targetResult.reason, connection);
-      const probes = await Promise.all(targets.map((target) => probeRelayTarget(connection, target)));
-      const successful = probes.filter((probe) => probe.sessions.status === 'fulfilled');
-      if (successful.length === 0) {
-        throw probes.flatMap((probe) => probe.errors)[0] ?? new Error('No authorized relay machine is reachable');
-      }
-      if (latestRefreshGeneration.get(connection.id) !== generation) return;
-
-      let connections = get().connections;
-      if (identityResult.status === 'fulfilled' && identityResult.value) {
-        const identity = identityResult.value;
-        if (!connection.relayDeviceID || connection.relayDeviceID === identity.clientID) {
-          connections = connections.map((item) => item.id === connection.id ? applyRelayDeviceIdentity(item, identity) : item);
-        }
-      }
-
-      const successfulTargetIDs = new Set(successful.map((probe) => probe.target.id));
-      const targetNames = new Map(targets.map((target) => [target.id, target.name]));
-      const retained = (get().sessions[connection.id] ?? []).filter((session) =>
-        !successfulTargetIDs.has(session.relayTargetID ?? DIRECT_RELAY_TARGET_ID),
-      ).map((session) => {
-        const canonicalName = session.relayTargetID ? targetNames.get(session.relayTargetID) : undefined;
-        return canonicalName ? { ...session, relayTargetName: canonicalName } : session;
-      });
-      const sessions = [
-        ...successful.flatMap((probe) => (probe.sessions as PromiseFulfilledResult<Session[]>).value),
-        ...retained,
-      ].sort(compareSessionsByRecency);
-      const statusTargetIDs = new Set(
-        probes.filter((probe) => probe.statuses.status === 'fulfilled').map((probe) => probe.target.id),
-      );
-      const statuses = omitCompositeTargets(get().sessionStatuses, connection.id, statusTargetIDs);
-      for (const probe of successful) {
-        if (probe.statuses.status !== 'fulfilled') continue;
-        for (const [sessionId, status] of Object.entries(probe.statuses.value)) {
-          statuses[sessionStateKey({ connectionId: connection.id, relayTargetID: probe.target.id, sessionId })] = status;
-        }
-      }
-      const relayTargets = probes.map((probe): RelayTargetState => ({
-        ...probe.target,
-        reachable: probe.sessions.status === 'fulfilled',
-        lastChecked: new Date().toISOString(),
-        ...(probe.errors[0] ? { error: errorMessage(probe.errors[0]) } : {}),
-      }));
-      const health = aggregateHealth(probes);
-      connections = markReachable(connections, connection.id, health);
-      const projects = groupSessionsByDirectory(sessions);
-      const syncError = summarizeSyncIssues(
-        probes.flatMap((probe) => probe.errors.map((error) => `${probe.target.name}: ${errorMessage(error)}`)),
-      );
-      await saveConnections(connections);
-      set((state) => ({
-        connections,
-        sessions: { ...state.sessions, [connection.id]: sessions },
-        projects: { ...state.projects, [connection.id]: projects },
-        relayTargets: { ...state.relayTargets, [connection.id]: relayTargets },
-        sessionStatuses: statuses,
-        hostSyncStates: { ...state.hostSyncStates, [connection.id]: syncError ? 'error' : 'idle' },
-        hostSyncErrors: { ...state.hostSyncErrors, [connection.id]: syncError },
-        ...(state.activeConnectionId === connection.id
-          ? { loading: syncError ? 'error' as const : 'idle' as const, error: syncError }
-          : {}),
-      }));
-      void saveHostSessionCache(connection.id, {
-        sessions,
-        projects,
-        sessionStatuses: compositeValuesForConnection(statuses, connection.id),
-        agents: [],
-        commands: [],
-      }).catch(() => undefined);
-    } catch (error) {
-      if (latestRefreshGeneration.get(connection.id) === generation) {
-        const message = errorMessage(error);
-        set((state) => ({
-          hostSyncStates: { ...state.hostSyncStates, [connection.id]: 'error' },
-          hostSyncErrors: { ...state.hostSyncErrors, [connection.id]: message },
-          ...(state.activeConnectionId === connection.id ? { loading: 'error' as const, error: message } : {}),
-        }));
-      }
-    }
+    const existing = hostRefreshFlights.get(connection.id);
+    if (existing) return existing;
+    const flight = refreshHost(connection, options, get, set).finally(() => {
+      if (hostRefreshFlights.get(connection.id) === flight) hostRefreshFlights.delete(connection.id);
+    });
+    hostRefreshFlights.set(connection.id, flight);
+    return flight;
   },
 
   subscribeToActiveHost() {
@@ -689,11 +616,16 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
             eventConnected: { ...current.eventConnected, [key]: connectionState === 'live' },
             eventConnectionStates: { ...current.eventConnectionStates, [key]: connectionState },
           }));
+          // Reconcile after the stream opens as well: a gate may have been
+          // asked between the initial REST snapshot and SSE connection.
+          if (connectionState === 'live') void refreshSessionPermissions(ref, connection, get, set);
         },
         onReconnect: async () => {
           if (get().activeSessionKey !== key) return;
-          await get().refreshActiveHost({ background: true });
-          await openSessionInBackground(ref, connection, get, set);
+          await Promise.all([
+            get().refreshActiveHost({ background: true }),
+            openSessionInBackground(ref, connection, get, set),
+          ]);
         },
       },
     );
@@ -1054,13 +986,18 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
   },
 
   async respondToPermission(input, permissionId, action, message) {
-    const { ref, connection } = requireSessionContext(input, get());
+    const { ref, connection, session } = requireSessionContext(input, get());
     await clientFor(connection, ref.relayTargetID).respondToPermission(
       ref.sessionId,
       permissionId,
       createPermissionReply(action, message),
+      workspaceQueryForSession(session),
     );
-    await get().openSession(ref);
+    const key = sessionStateKey(ref);
+    set((state) => ({
+      permissions: { ...state.permissions, [key]: (state.permissions[key] ?? []).filter((request) => request.id !== permissionId) },
+      permissionErrors: { ...state.permissionErrors, [key]: null },
+    }));
   },
 
   async respondToQuestion(input, payload) {
@@ -1287,20 +1224,177 @@ type StoreSet = (
   partial: Partial<MobileStore> | ((state: MobileStore) => Partial<MobileStore>),
 ) => void;
 
+async function refreshHost(
+  connection: HostConnection,
+  options: { background?: boolean },
+  get: StoreGet,
+  set: StoreSet,
+) {
+  const generation = ++refreshGeneration;
+  latestRefreshGeneration.set(connection.id, generation);
+  set((state) => ({
+    hostSyncStates: { ...state.hostSyncStates, [connection.id]: 'loading' },
+    hostSyncErrors: { ...state.hostSyncErrors, [connection.id]: null },
+    hostSyncNotes: { ...state.hostSyncNotes, [connection.id]: null },
+    ...(!options.background ? { loading: 'loading' as const, error: null } : {}),
+  }));
+
+  try {
+    const baseClient = clientFor(connection);
+    const [identityResult, targetResult] = await Promise.allSettled([
+      connection.authType === 'bearer' ? baseClient.getRelayDeviceIdentity() : Promise.resolve(undefined),
+      baseClient.listRelayTargets(),
+    ]);
+    const targets = targetResult.status === 'fulfilled'
+      ? normalizeTargets(targetResult.value)
+      : targetListFailureFallback(targetResult.reason, connection);
+    const probes = await Promise.all(targets.map((target) => probeRelayTarget(connection, target)));
+    const successful = probes.filter((probe) => probe.sessions.status === 'fulfilled');
+    if (successful.length === 0) {
+      throw probes.flatMap((probe) => probe.errors)[0] ?? new Error('No authorized relay machine is reachable');
+    }
+    if (latestRefreshGeneration.get(connection.id) !== generation) return;
+
+    let connections = get().connections;
+    if (identityResult.status === 'fulfilled' && identityResult.value) {
+      const identity = identityResult.value;
+      if (!connection.relayDeviceID || connection.relayDeviceID === identity.clientID) {
+        connections = connections.map((item) => item.id === connection.id ? applyRelayDeviceIdentity(item, identity) : item);
+      }
+    }
+
+    const successfulTargetIDs = new Set(successful.map((probe) => probe.target.id));
+    const targetNames = new Map(targets.map((target) => [target.id, target.name]));
+    const retained = (get().sessions[connection.id] ?? []).filter((session) =>
+      !successfulTargetIDs.has(session.relayTargetID ?? DIRECT_RELAY_TARGET_ID),
+    ).map((session) => {
+      const canonicalName = session.relayTargetID ? targetNames.get(session.relayTargetID) : undefined;
+      return canonicalName ? { ...session, relayTargetName: canonicalName } : session;
+    });
+    const sessions = [
+      ...successful.flatMap((probe) => (probe.sessions as PromiseFulfilledResult<Session[]>).value),
+      ...retained,
+    ].sort(compareSessionsByRecency);
+    const relayTargets = probes.map((probe): RelayTargetState => ({
+      ...probe.target,
+      reachable: probe.sessions.status === 'fulfilled',
+      lastChecked: new Date().toISOString(),
+      ...(probe.errors[0] ? { error: errorMessage(probe.errors[0]) } : {}),
+    }));
+    const health = aggregateHealth(probes);
+    connections = markReachable(connections, connection.id, health);
+    const projects = groupSessionsByDirectory(sessions);
+    const syncError = summarizeSyncIssues(
+      probes.flatMap((probe) => probe.errors.map((error) => `${probe.target.name}: ${errorMessage(error)}`)),
+    );
+    await saveConnections(connections);
+    if (latestRefreshGeneration.get(connection.id) !== generation) return;
+    set((state) => ({
+      connections,
+      sessions: { ...state.sessions, [connection.id]: sessions },
+      projects: { ...state.projects, [connection.id]: projects },
+      relayTargets: { ...state.relayTargets, [connection.id]: relayTargets },
+      hostSyncErrors: { ...state.hostSyncErrors, [connection.id]: syncError },
+      ...(state.activeConnectionId === connection.id
+        ? { loading: syncError ? 'error' as const : 'idle' as const, error: syncError }
+        : {}),
+    }));
+
+    // Publish the fast machine-wide index before touching directory instances.
+    // Historical directories can block in config/plugin initialization.
+    const stillCurrent = () => latestRefreshGeneration.get(connection.id) === generation
+      && get().connections.some((item) => item.id === connection.id);
+    const statusResults = await Promise.all(successful.map(async (probe) => {
+      const result = await refreshTargetStatuses(connection, probe.target,
+        (probe.sessions as PromiseFulfilledResult<Session[]>).value, get, (snapshot) => {
+          if (!stillCurrent()) return;
+          set((state) => ({ sessionStatuses: mergeSessionStatusSnapshots(state.sessionStatuses, [snapshot]) }));
+        }, stillCurrent);
+      return { ...result, name: probe.target.name };
+    }));
+    if (!stillCurrent()) return;
+    const finalError = summarizeSyncIssues([
+      ...probes.flatMap((probe) => probe.errors.map((error) => `${probe.target.name}: ${errorMessage(error)}`)),
+      ...statusResults.filter((result) => result.failed > 0).map((result) =>
+        `${result.name}: running-state checks failed for ${result.failed} project ${result.failed === 1 ? 'directory' : 'directories'}`),
+    ]);
+    const statusNote = statusResults.flatMap((result) => result.deferred > 0
+      ? [`${result.name}: ${result.deferred} project ${result.deferred === 1 ? 'directory' : 'directories'} awaiting their first running-state check`]
+      : result.stale ? [`${result.name}: showing previously checked running states`] : []).join('; ') || null;
+    set((state) => ({
+      hostSyncStates: { ...state.hostSyncStates, [connection.id]: finalError ? 'error' : 'idle' },
+      hostSyncErrors: { ...state.hostSyncErrors, [connection.id]: finalError },
+      hostSyncNotes: { ...state.hostSyncNotes, [connection.id]: statusNote },
+      ...(state.activeConnectionId === connection.id
+        ? { loading: finalError ? 'error' as const : 'idle' as const, error: finalError }
+        : {}),
+    }));
+    void saveHostSessionCache(connection.id, {
+      sessions,
+      projects,
+      sessionStatuses: compositeValuesForConnection(get().sessionStatuses, connection.id),
+      agents: [],
+      commands: [],
+    }).catch(() => undefined);
+  } catch (error) {
+    if (latestRefreshGeneration.get(connection.id) === generation) {
+      const message = errorMessage(error);
+      set((state) => ({
+        hostSyncStates: { ...state.hostSyncStates, [connection.id]: 'error' },
+        hostSyncErrors: { ...state.hostSyncErrors, [connection.id]: message },
+        ...(state.activeConnectionId === connection.id ? { loading: 'error' as const, error: message } : {}),
+      }));
+    }
+  }
+}
+
 interface TargetProbe {
   target: RelayTarget;
   health: PromiseSettledResult<HealthResponse>;
   sessions: PromiseSettledResult<Session[]>;
-  statuses: PromiseSettledResult<Record<string, SessionStatus>>;
   errors: unknown[];
+}
+
+interface SessionStatusSnapshot {
+  previous: Record<string, SessionStatus>;
+  values: Record<string, SessionStatus>;
+}
+
+async function readSessionStatusSnapshot(
+  client: OpenCodeClient,
+  ref: Pick<SessionRef, 'connectionId' | 'relayTargetID'>,
+  sessions: Session[],
+  get: StoreGet,
+  policy: RequestPolicy = {},
+): Promise<SessionStatusSnapshot> {
+  const previous = get().sessionStatuses;
+  const statuses = await client.getSessionStatus(workspaceQueryForSession(sessions[0]), policy);
+  return {
+    previous,
+    values: Object.fromEntries(sessions.map((session) => [
+      sessionStateKey({ ...ref, sessionId: session.id }),
+      // OpenCode omits idle sessions from a successful directory snapshot.
+      statuses[session.id] ?? { type: 'idle' as const },
+    ])),
+  };
+}
+
+function mergeSessionStatusSnapshots(current: Record<string, SessionStatus>, snapshots: SessionStatusSnapshot[]) {
+  const merged = { ...current };
+  for (const snapshot of snapshots) {
+    for (const [key, status] of Object.entries(snapshot.values)) {
+      // A live event or another read may have updated this session in flight.
+      if (current[key] === snapshot.previous[key]) merged[key] = status;
+    }
+  }
+  return merged;
 }
 
 async function probeRelayTarget(connection: HostConnection, target: RelayTarget): Promise<TargetProbe> {
   const client = clientFor(connection, target.id);
-  const [health, sessionsResult, statuses] = await Promise.allSettled([
+  const [health, sessionsResult] = await Promise.allSettled([
     client.health(),
     client.listSessions(),
-    client.getSessionStatus(),
   ]);
   const sessions = sessionsResult.status === 'fulfilled'
     ? {
@@ -1312,14 +1406,81 @@ async function probeRelayTarget(connection: HostConnection, target: RelayTarget)
         })),
       }
     : sessionsResult;
+  const errors = [
+    ...(health.status === 'rejected' ? [new Error(`Health check: ${errorMessage(health.reason)}`)] : []),
+    ...(sessions.status === 'rejected' ? [new Error(`Session list: ${errorMessage(sessions.reason)}`)] : []),
+  ];
+  return { target, health, sessions, errors };
+}
+
+async function refreshTargetStatuses(
+  connection: HostConnection,
+  target: RelayTarget,
+  sessions: Session[],
+  get: StoreGet,
+  onSnapshot: (snapshot: SessionStatusSnapshot) => void,
+  stillCurrent: () => boolean,
+) {
+  const client = clientFor(connection, target.id);
+  const scopes = new Map<string, Session[]>();
+  // The index is already sorted by activity, so recent directories go first.
+  for (const session of sessions) {
+    const scope = JSON.stringify(workspaceQueryForSession(session));
+    const group = scopes.get(scope) ?? [];
+    group.push(session);
+    scopes.set(scope, group);
+  }
+  const targetKey = JSON.stringify([connection.id, target.id]);
+  const checks = statusScopeChecks.get(targetKey) ?? new Map<string, { attemptedAt: number; failed: boolean }>();
+  statusScopeChecks.set(targetKey, checks);
+  for (const scope of checks.keys()) if (!scopes.has(scope)) checks.delete(scope);
+  const started = Date.now();
+  const activeKey = get().activeSessionKey;
+  const isActive = (group: Session[]) => group.some((session) =>
+    sessionStateKey({ connectionId: connection.id, relayTargetID: target.id, sessionId: session.id }) === activeKey);
+  const isRunning = (group: Session[]) => group.some((session) => {
+    const status = get().sessionStatuses[sessionStateKey({ connectionId: connection.id, relayTargetID: target.id, sessionId: session.id })];
+    return status && ('running' in status ? status.running : status.type !== 'idle');
+  });
+  const needsCheck = (scope: string, group: Session[]) => {
+    const check = checks.get(scope);
+    // Recent successful snapshots can serve repeated refreshes. Failed reads
+    // back off too, rather than consuming every budget with the same directory.
+    return !check || started - check.attemptedAt >= (!check.failed && (isActive(group) || isRunning(group)) ? 5_000 : 30_000);
+  };
+  const queue = [...scopes].filter(([scope, group]) => needsCheck(scope, group))
+    .sort(([a, aGroup], [b, bGroup]) => Number(isActive(bGroup)) - Number(isActive(aGroup))
+      || (checks.get(a)?.attemptedAt ?? -Infinity) - (checks.get(b)?.attemptedAt ?? -Infinity));
+  const deadline = started + sessionStatusSyncBudgetMs;
+  let checked = 0;
+  for (const [scope, group] of queue) {
+    if (!stillCurrent()) break;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    try {
+      const snapshot = await readSessionStatusSnapshot(client, {
+        connectionId: connection.id, relayTargetID: target.id,
+      }, group, get, { timeoutMs: Math.min(sessionStatusRequestTimeoutMs, remaining), retry: false });
+      onSnapshot(snapshot);
+      checks.set(scope, { attemptedAt: Date.now(), failed: false });
+    } catch {
+      // The final shortened request may hit our overall budget rather than
+      // its normal timeout. Leave it queued, not recorded as a server failure.
+      if (remaining < sessionStatusRequestTimeoutMs && Date.now() >= deadline) break;
+      checks.set(scope, { attemptedAt: Date.now(), failed: true });
+    }
+    checked += 1;
+    if (checked < queue.length && stillCurrent()) {
+      // A sequential loop can still overwhelm FRP with fast requests.
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(200, deadline - Date.now()))));
+    }
+  }
   return {
-    target,
-    health,
-    sessions,
-    statuses,
-    errors: [health, sessions, statuses]
-      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
-      .map((result) => result.reason),
+    failed: [...checks.values()].filter((check) => check.failed).length,
+    // Expiring a successful snapshot does not undo completed discovery. Keep
+    // initial progress separate from routine refreshes of known directories.
+    deferred: queue.slice(checked).filter(([scope]) => !checks.has(scope)).length,
+    stale: queue.slice(checked).some(([scope]) => checks.get(scope)?.failed === false),
   };
 }
 
@@ -1336,6 +1497,9 @@ async function loadSession(
   const client = clientFor(connection, ref.relayTargetID);
   const query = workspaceQueryForSession(session);
   const questionRevision = get().questionRevision;
+  // Gates must appear as soon as the queue arrives, even if optional project
+  // services (LSP/MCP/provider discovery) are still initializing.
+  const permissionsRead = refreshSessionPermissions(ref, connection, get, set);
   const results = await Promise.allSettled([
     client.listMessagePage(ref.sessionId, { limit: DEFAULT_MESSAGE_PAGE_LIMIT }),
     client.getSessionDiff(ref.sessionId),
@@ -1348,10 +1512,12 @@ async function loadSession(
     client.listConfiguredProviders(query),
     client.getConfig(query),
     client.listCommands(query),
+    readSessionStatusSnapshot(client, ref, [session], get),
   ] as const);
+  await permissionsRead;
   if (latestOpenGeneration.get(key) !== generation) return;
 
-  const [messagesResult, diffsResult, todosResult, contextResult, lspResult, mcpResult, questionsResult, agentsResult, providersResult, configResult, commandsResult] = results;
+  const [messagesResult, diffsResult, todosResult, contextResult, lspResult, mcpResult, questionsResult, agentsResult, providersResult, configResult, commandsResult, statusResult] = results;
   const messages = messagesResult.status === 'fulfilled'
     ? mergeRestWithLiveMessages(messagesResult.value.items, get().messages[key] ?? [])
     : get().messages[key] ?? [];
@@ -1403,6 +1569,9 @@ async function loadSession(
       : state.questions;
     return {
       messages: { ...state.messages, [key]: messages },
+      ...(statusResult.status === 'fulfilled'
+        ? { sessionStatuses: mergeSessionStatusSnapshots(state.sessionStatuses, [statusResult.value]) }
+        : {}),
       ...(messagesResult.status === 'fulfilled'
         ? {
             messageNextCursors: { ...state.messageNextCursors, [key]: messagesResult.value.nextCursor },
@@ -1450,13 +1619,19 @@ async function openSessionInBackground(ref: SessionRef, connection: HostConnecti
   const session = currentSessionForRef(get(), ref);
   if (!session) return;
   try {
+    const permissionsRead = refreshSessionPermissions(ref, connection, get, set);
     const questionRevision = get().questionRevision;
     const client = clientFor(connection, ref.relayTargetID);
-    const [messagesResult, questionsResult] = await Promise.allSettled([
+    const [messagesResult, questionsResult, statusResult] = await Promise.allSettled([
       client.listMessagePage(ref.sessionId, { limit: DEFAULT_MESSAGE_PAGE_LIMIT }),
       client.listQuestions(workspaceQueryForSession(session)),
+      readSessionStatusSnapshot(client, ref, [session], get),
     ]);
+    await permissionsRead;
     set((state) => ({
+      ...(statusResult.status === 'fulfilled'
+        ? { sessionStatuses: mergeSessionStatusSnapshots(state.sessionStatuses, [statusResult.value]) }
+        : {}),
       ...(messagesResult.status === 'fulfilled'
         ? {
             messages: { ...state.messages, [key]: mergeRestWithLiveMessages(messagesResult.value.items, state.messages[key] ?? []) },
@@ -1758,6 +1933,21 @@ function applyServerEvent(state: MobileStore, scopeRef: SessionRef, event: Serve
       sessionStatuses: { ...state.sessionStatuses, [key]: { type: 'idle' as const } },
     };
   }
+  if (event.type === 'permission.asked') {
+    const request = properties as unknown as PermissionRequest;
+    if (!request.id || !request.sessionID || !request.permission || !Array.isArray(request.patterns)) return {};
+    return {
+      permissions: { ...state.permissions, [key]: [...(state.permissions[key] ?? []).filter((item) => item.id !== request.id), request] },
+      permissionErrors: { ...state.permissionErrors, [key]: null },
+    };
+  }
+  if (event.type === 'permission.replied') {
+    const requestID = stringValue(properties.requestID);
+    if (!sessionId || !requestID) return {};
+    return {
+      permissions: { ...state.permissions, [key]: (state.permissions[key] ?? []).filter((item) => item.id !== requestID) },
+    };
+  }
 
   if (event.type === 'question.asked') {
     const request = properties as unknown as QuestionRequest;
@@ -1797,6 +1987,8 @@ function applyServerEvent(state: MobileStore, scopeRef: SessionRef, event: Serve
       diffs: omitRecordKey(state.diffs, key),
       todos: omitRecordKey(state.todos, key),
       questions: omitRecordKey(state.questions, key),
+      permissions: omitRecordKey(state.permissions, key),
+      permissionErrors: omitRecordKey(state.permissionErrors, key),
     };
   }
   if (event.type === 'session.status') {
@@ -1907,6 +2099,31 @@ function upsertMessagePart(messages: MessageWithParts[], sessionId: string, mess
   const updated = { ...target, parts };
   if (index < 0) return [...messages, updated];
   return messages.map((message, messageIndex) => messageIndex === index ? updated : message);
+}
+
+async function refreshSessionPermissions(ref: SessionRef, connection: HostConnection, get: StoreGet, set: StoreSet) {
+  const key = sessionStateKey(ref);
+  const session = currentSessionForRef(get(), ref);
+  if (!session) return;
+  const previous = get().permissions[key];
+  const revision = (permissionReads.get(key) ?? 0) + 1;
+  permissionReads.set(key, revision);
+  const current = () => permissionReads.get(key) === revision
+    && Boolean(currentSessionForRef(get(), ref))
+    && get().connections.some((item) => item.id === connection.id);
+  try {
+    const requests = await clientFor(connection, ref.relayTargetID).listPermissions(workspaceQueryForSession(session));
+    if (!current()) return;
+    set((state) => state.permissions[key] === previous ? {
+      permissions: { ...state.permissions, [key]: requests.filter((request) => request.sessionID === ref.sessionId) },
+      permissionErrors: { ...state.permissionErrors, [key]: null },
+    } : {});
+  } catch (error) {
+    if (!current()) return;
+    set((state) => state.permissions[key] === previous ? {
+      permissionErrors: { ...state.permissionErrors, [key]: `Could not check pending permissions: ${errorMessage(error)}` },
+    } : {});
+  }
 }
 
 function mergeQuestionsForTarget(
@@ -2023,13 +2240,6 @@ function persistTranscriptCache(ref: SessionRef, state: MobileStore) {
 
 function compositeValuesForConnection<T>(record: Record<string, T>, connectionId: string) {
   return Object.fromEntries(Object.entries(record).filter(([key]) => decodeSessionStateKey(key)?.connectionId === connectionId));
-}
-
-function omitCompositeTargets<T>(record: Record<string, T>, connectionId: string, targets: Set<string>) {
-  return Object.fromEntries(Object.entries(record).filter(([key]) => {
-    const ref = decodeSessionStateKey(key);
-    return !ref || ref.connectionId !== connectionId || !targets.has(ref.relayTargetID);
-  }));
 }
 
 function omitCompositeConnection<T>(record: Record<string, T>, connectionId: string) {

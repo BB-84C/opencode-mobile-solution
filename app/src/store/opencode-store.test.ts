@@ -140,6 +140,7 @@ function fakeClient(overrides: Partial<OpenCodeClientLike> = {}): OpenCodeClient
     findFiles: vi.fn(),
     getSessionDiff: vi.fn(),
     respondToPermission: vi.fn(),
+    listPermissions: vi.fn(),
     listQuestions: vi.fn(),
     respondToQuestion: vi.fn(),
     rejectQuestion: vi.fn(),

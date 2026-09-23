@@ -14,6 +14,7 @@ import type {
   MessageWithParts,
   ModelRef,
   PermissionReply,
+  PermissionRequest,
   PromptDispatchOptions,
   Project,
   QuestionReplyBody,
@@ -33,6 +34,11 @@ export interface WorkspaceQuery {
   workspace?: string;
   limit?: number;
   type?: 'file' | 'directory';
+}
+
+export interface RequestPolicy {
+  timeoutMs?: number;
+  retry?: boolean;
 }
 
 export interface OpenCodeClientOptions {
@@ -75,6 +81,8 @@ export class OpenCodeRequestError extends Error {
 export function isTransientOpenCodeError(error: unknown) {
   if (error instanceof OpenCodeRequestError) return error.transient;
   if (isAbortError(error)) return true;
+  // Expo fetch wraps native transport failures in Error, rather than TypeError.
+  if (error instanceof Error && error.message.startsWith('fetch failed:')) return true;
   return error instanceof TypeError || (typeof error === 'object' && error !== null && 'code' in error);
 }
 
@@ -109,7 +117,8 @@ export interface OpenCodeClientLike {
   getConfig?(options?: WorkspaceQuery): Promise<Record<string, unknown>>;
   findFiles(query: string, options?: WorkspaceQuery): Promise<FileReference[]>;
   getSessionDiff(sessionId: string, messageId?: string): Promise<FileDiff[]>;
-  respondToPermission(sessionId: string, permissionId: string, reply: PermissionReply): Promise<void>;
+  listPermissions(options?: WorkspaceQuery): Promise<PermissionRequest[]>;
+  respondToPermission(sessionId: string, permissionId: string, reply: PermissionReply, options?: WorkspaceQuery): Promise<void>;
   listQuestions(options?: WorkspaceQuery): Promise<QuestionRequest[]>;
   respondToQuestion(requestId: string, reply: QuestionReplyBody, options?: WorkspaceQuery): Promise<void>;
   rejectQuestion(requestId: string, options?: WorkspaceQuery): Promise<void>;
@@ -329,8 +338,9 @@ export class OpenCodeClient implements OpenCodeClientLike {
     });
   }
 
-  getSessionStatus(options: WorkspaceQuery = {}) {
+  getSessionStatus(options: WorkspaceQuery = {}, policy: RequestPolicy = {}) {
     return this.request<Record<string, SessionStatus>>(`/session/status${workspaceQuery(options)}`, {
+      ...policy,
       directory: options.directory,
     });
   }
@@ -372,14 +382,17 @@ export class OpenCodeClient implements OpenCodeClientLike {
   ): Promise<MessagePage> {
     const params = new URLSearchParams({ limit: String(positiveMessageLimit(options.limit)) });
     if (options.before) params.set('before', options.before);
-    const response = await this.rawFetch(
+    return this.rawFetch(
       `/session/${encodeURIComponent(sessionId)}/message?${params.toString()}`,
+      {},
+      async (response) => {
+        const text = await response.text();
+        return {
+          items: text ? (JSON.parse(text) as MessageWithParts[]) : [],
+          nextCursor: nextCursorFromResponse(response),
+        };
+      },
     );
-    const text = await response.text();
-    return {
-      items: text ? (JSON.parse(text) as MessageWithParts[]) : [],
-      nextCursor: nextCursorFromResponse(response),
-    };
   }
 
   async getSessionContext(sessionId: string) {
@@ -490,12 +503,17 @@ export class OpenCodeClient implements OpenCodeClientLike {
     return this.request<FileDiff[]>(`/session/${encodeURIComponent(sessionId)}/diff${query}`);
   }
 
-  async respondToPermission(sessionId: string, permissionId: string, reply: PermissionReply) {
+  listPermissions(options: WorkspaceQuery = {}) {
+    return this.request<PermissionRequest[]>(`/permission${workspaceQuery(options)}`, { directory: options.directory });
+  }
+
+  async respondToPermission(_sessionId: string, permissionId: string, reply: PermissionReply, options: WorkspaceQuery = {}) {
     await this.request<void>(
-      `/session/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(permissionId)}`,
+      `/permission/${encodeURIComponent(permissionId)}/reply${workspaceQuery(options)}`,
       {
         method: 'POST',
         body: reply,
+        directory: options.directory,
       },
     );
   }
@@ -578,6 +596,7 @@ export class OpenCodeClient implements OpenCodeClientLike {
           const response = await this.rawFetch(
             `/event${options.directory ? workspaceQuery({ directory: options.directory }) : ''}`,
             { signal: controller.signal, directory: options.directory },
+            async (response) => response,
           );
           const body = response.body;
           const reader = body && 'getReader' in body ? body.getReader() : undefined;
@@ -596,7 +615,7 @@ export class OpenCodeClient implements OpenCodeClientLike {
           }
           parser.flush();
         } catch (error) {
-          if (stopped && isAbortError(error)) break;
+          if (stopped) break;
           if (error instanceof OpenCodeRequestError && !error.transient) {
             options.onConnectionState?.('offline', error);
             return;
@@ -629,20 +648,23 @@ export class OpenCodeClient implements OpenCodeClientLike {
       body?: unknown;
       timeoutMs?: number;
       directory?: string;
+      retry?: boolean;
     } = {},
   ): Promise<T> {
-    const response = await this.rawFetch(path, {
+    return this.rawFetch(path, {
       method: options.method ?? 'GET',
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       timeoutMs: options.timeoutMs,
       directory: options.directory,
+      retry: options.retry,
+    }, async (response) => {
+      const text = await response.text();
+      if (!text) return undefined as T;
+      return JSON.parse(text) as T;
     });
-    const text = await response.text();
-    if (!text) return undefined as T;
-    return JSON.parse(text) as T;
   }
 
-  private async rawFetch(
+  private async rawFetch<T>(
     path: string,
     options: {
       method?: string;
@@ -650,49 +672,66 @@ export class OpenCodeClient implements OpenCodeClientLike {
       signal?: AbortSignal;
       timeoutMs?: number;
       directory?: string;
-    } = {},
-  ) {
+      retry?: boolean;
+    },
+    consume: (response: Response) => Promise<T>,
+  ): Promise<T> {
     this.assertTransportAllowed();
     const method = options.method ?? 'GET';
-    const maxAttempts = !options.signal && method === 'GET' ? 3 : 1;
+    const maxAttempts = !options.signal && method === 'GET' && options.retry !== false ? 3 : 1;
     let lastError: unknown;
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const controller = options.signal ? undefined : new AbortController();
-      const timeout = controller
-        ? setTimeout(() => controller.abort(), options.timeoutMs ?? this.timeoutMs)
-        : undefined;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let timeoutError: OpenCodeRequestError | undefined;
+      const deadline = controller ? new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          timeoutError = new OpenCodeRequestError(
+            `OpenCode request timed out after ${Math.ceil((options.timeoutMs ?? this.timeoutMs) / 1000)}s (${method} ${path.split('?')[0]})`,
+            undefined,
+            true,
+          );
+          // Bound both headers and body, even if a native body read fails to
+          // settle when its task is canceled. The request is still aborted.
+          reject(timeoutError);
+          controller.abort();
+        }, options.timeoutMs ?? this.timeoutMs);
+      }) : undefined;
       try {
-        const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-          method,
-          headers: {
-            ...buildAuthHeaders(this.connection),
-            ...(this.relayTargetID ? { 'X-OpenCode-Target': this.relayTargetID } : {}),
-            ...(options.directory ? { 'X-OpenCode-Directory': options.directory } : {}),
-          },
-          body: options.body,
-          signal: options.signal ?? controller?.signal,
-        });
-
-        if (!response.ok) {
-          const rawDetail = await response.text().catch(() => '');
-          const detail = formatResponseErrorDetail(
-            rawDetail,
-            response.headers?.get?.('content-type') ?? '',
-            response.statusText,
-          );
-          const transient = response.status === 408 || response.status === 429 || response.status >= 500;
-          throw new OpenCodeRequestError(
-            `OpenCode request failed (${response.status})${detail ? `: ${detail}` : ''}`,
-            response.status,
-            transient,
-          );
-        }
-
-        return response;
+        const perform = async () => {
+          const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+            method,
+            headers: {
+              ...buildAuthHeaders(this.connection),
+              ...(this.relayTargetID ? { 'X-OpenCode-Target': this.relayTargetID } : {}),
+              ...(options.directory ? { 'X-OpenCode-Directory': options.directory } : {}),
+            },
+            body: options.body,
+            signal: options.signal ?? controller?.signal,
+          });
+          if (!response.ok) {
+            const rawDetail = await response.text().catch(() => '');
+            const detail = formatResponseErrorDetail(
+              rawDetail,
+              response.headers?.get?.('content-type') ?? '',
+              response.statusText,
+            );
+            const transient = response.status === 408 || response.status === 429 || response.status >= 500;
+            throw new OpenCodeRequestError(
+              `OpenCode request failed (${response.status})${detail ? `: ${detail}` : ''}`,
+              response.status,
+              transient,
+            );
+          }
+          return consume(response);
+        };
+        return await (deadline ? Promise.race([perform(), deadline]) : perform());
       } catch (error) {
-        lastError = error;
-        if (attempt + 1 >= maxAttempts || !isTransientOpenCodeError(error)) throw error;
+        const failure = timeoutError ?? error;
+        if (timeout) clearTimeout(timeout);
+        lastError = failure;
+        if (attempt + 1 >= maxAttempts || !isTransientOpenCodeError(failure)) throw failure;
         await delay(250 * 2 ** attempt);
       } finally {
         if (timeout) clearTimeout(timeout);
@@ -794,7 +833,7 @@ function assertVerifiedDispatch(options: PromptDispatchOptions) {
 
 function isAbortError(error: unknown) {
   return (
-    error instanceof DOMException && error.name === 'AbortError'
+    typeof DOMException !== 'undefined' && error instanceof DOMException && error.name === 'AbortError'
   ) || (typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError');
 }
 

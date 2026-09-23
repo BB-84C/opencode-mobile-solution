@@ -37,6 +37,72 @@ describe('buildAuthHeaders', () => {
 });
 
 describe('OpenCodeClient', () => {
+  it('retries a read after Expo reports the native cancellation caused by our timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const signals: AbortSignal[] = [];
+      const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        signals.push(init!.signal as AbortSignal);
+        if (signals.length > 1) return jsonResponse({ healthy: true });
+        return new Promise<Response>((_resolve, reject) => {
+          init!.signal!.addEventListener('abort', () => reject(new Error(
+            'fetch failed: FetchRequestCanceledException: Fetch request has been canceled (at Expo/NativeResponse.swift:63)',
+          )));
+        });
+      });
+      const client = new OpenCodeClient(bearerConnection, { fetch: fetchMock, timeoutMs: 50 });
+      const result = client.health();
+      await vi.runAllTimersAsync();
+      await expect(result).resolves.toEqual({ healthy: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(signals.map((signal) => signal.aborted)).toEqual([true, false]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds a native body read that never settles and honors the single-attempt status policy', async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        signal = init!.signal as AbortSignal;
+        return { ok: true, text: () => new Promise<string>(() => {}) } as Response;
+      });
+      const client = new OpenCodeClient(bearerConnection, { fetch: fetchMock });
+      const result = expect(client.getSessionStatus({ directory: '/private/project' }, { timeoutMs: 50, retry: false }))
+        .rejects.toThrow('OpenCode request timed out after 1s (GET /session/status)');
+      await vi.runAllTimersAsync();
+      await result;
+      expect(signal?.aborted).toBe(true);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries Expo transport failures but never retries a timed-out mutation', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn()
+        .mockRejectedValueOnce(new Error('fetch failed: connection interrupted'))
+        .mockResolvedValueOnce(jsonResponse({ healthy: true }));
+      const client = new OpenCodeClient(bearerConnection, { fetch: fetchMock, timeoutMs: 50 });
+      const health = client.health();
+      await vi.runAllTimersAsync();
+      await expect(health).resolves.toEqual({ healthy: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      fetchMock.mockReset().mockImplementation(() => new Promise<Response>(() => {}));
+      const mutation = expect(client.createSession('Test', '/repo')).rejects.toThrow('timed out');
+      await vi.runAllTimersAsync();
+      await mutation;
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('binds the default browser fetch implementation', async () => {
     const originalFetch = globalThis.fetch;
     const fetchMock = vi.fn(function (this: unknown) {
@@ -533,6 +599,31 @@ describe('OpenCodeClient', () => {
       'https://opencode.example.com/find/file?query=package&limit=5&type=file',
       expect.any(Object),
     );
+  });
+
+  it('loads standalone permission gates and replies with the current scoped API contract', async () => {
+    const request = { id: 'per_123', sessionID: 'ses_1', permission: 'external_directory', patterns: ['/etc/*'], metadata: { command: 'cat /etc/hosts' }, always: ['/etc/*'] };
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      jsonResponse(init?.method === 'POST' ? true : [request]));
+    const client = new OpenCodeClient(bearerConnection, { fetch: fetchMock, relayTargetID: 'mac' });
+    const query = { directory: '/Users/test', workspace: 'ws_1' };
+    await expect(client.listPermissions(query)).resolves.toEqual([request]);
+    await client.respondToPermission('ses_1', request.id, { reply: 'reject', message: 'Stay in the workspace' }, query);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      'https://opencode.example.com/permission?directory=%2FUsers%2Ftest&workspace=ws_1',
+      'https://opencode.example.com/permission/per_123/reply?directory=%2FUsers%2Ftest&workspace=ws_1',
+    ]);
+    const init = fetchMock.mock.calls[1][1];
+    expect(new Headers(init?.headers).get('X-OpenCode-Target')).toBe('mac');
+    expect(new Headers(init?.headers).get('X-OpenCode-Directory')).toBe('/Users/test');
+    expect(JSON.parse(String(init?.body))).toEqual({ reply: 'reject', message: 'Stay in the workspace' });
+  });
+
+  it('does not replay a permission decision after a transport failure', async () => {
+    const fetchMock = vi.fn(async () => { throw new TypeError('Failed to fetch'); });
+    const client = new OpenCodeClient(bearerConnection, { fetch: fetchMock });
+    await expect(client.respondToPermission('ses_1', 'per_1', { reply: 'once' }, { directory: '/repo' })).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('replies to OpenCode question requests with answers matrix', async () => {

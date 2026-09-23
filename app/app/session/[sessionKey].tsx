@@ -22,6 +22,7 @@ import { ActionModal } from '@/src/components/opencode/ActionModal';
 import { MessageCard } from '@/src/components/opencode/MessageCard';
 import { ModelPickerModal } from '@/src/components/opencode/ModelPickerModal';
 import { QuestionRequestCard } from '@/src/components/opencode/QuestionRequestCard';
+import { PermissionRequestCard } from '@/src/components/opencode/PermissionRequestCard';
 import {
   VirtualizedTranscript,
   type VirtualizedTranscriptHandle,
@@ -88,6 +89,8 @@ export default function SessionScreen() {
     olderMessageLoadStates: state.olderMessageLoadStates,
     olderMessageErrors: state.olderMessageErrors,
     questions: state.questions,
+    permissions: state.permissions,
+    permissionErrors: state.permissionErrors,
     sessionLoadStates: state.sessionLoadStates,
     sessionErrors: state.sessionErrors,
     eventConnectionStates: state.eventConnectionStates,
@@ -213,6 +216,8 @@ export default function SessionScreen() {
   );
   const status = key ? store.sessionStatuses[key] : undefined;
   const questions = key ? store.questions[key] ?? [] : [];
+  const permissions = key ? store.permissions?.[key] ?? [] : [];
+  const permissionError = key ? store.permissionErrors?.[key] : null;
   const loadState = key ? store.sessionLoadStates[key] : undefined;
   const nextMessageCursor = key ? store.messageNextCursors[key] : null;
   const olderMessageLoadState = key ? store.olderMessageLoadStates[key] : undefined;
@@ -221,7 +226,7 @@ export default function SessionScreen() {
   const connectionState = key ? store.eventConnectionStates[key] : undefined;
   const running = isRunningStatus(status);
   const pendingPermissions = useMemo(() => getPendingPermissions(transcript), [transcript]);
-  const promptBlocked = isPromptBlocked(transcript) || questions.length > 0;
+  const promptBlocked = isPromptBlocked(transcript) || permissions.length > 0 || questions.length > 0;
   const canSend = Boolean(ref && contract && contractFresh && selection?.agentName && selection.model && prompt.trim() && !promptBlocked);
   const targetStatuses = useMemo(() => {
     if (!ref) return {};
@@ -468,8 +473,12 @@ export default function SessionScreen() {
           ) : null}
         </View>
 
-        {questions.length > 0 ? (
+        {permissions.length > 0 || questions.length > 0 || permissionError ? (
           <ScrollView testID="session-question-surface" style={styles.questions} contentContainerStyle={styles.questionContent} keyboardShouldPersistTaps="handled">
+            {permissionError ? <Text selectable style={styles.error}>{permissionError}</Text> : null}
+            {permissions.map((request) => (
+              <PermissionRequestCard key={request.id} request={request} onReply={handlePermissionReply} />
+            ))}
             {questions.map((question) => (
               <QuestionRequestCard
                 key={question.id}
@@ -564,7 +573,7 @@ export default function SessionScreen() {
                 }}
               />
             ) : null}
-            {pendingPermissions.length ? <Text style={styles.permission}>{pendingPermissions.length} permission pending</Text> : null}
+            {pendingPermissions.length + permissions.length ? <Text style={styles.permission}>{pendingPermissions.length + permissions.length} permission pending</Text> : null}
           </ScrollView>
         </View>
 
@@ -802,7 +811,7 @@ const styles = StyleSheet.create({
   notice: { paddingHorizontal: 9, paddingVertical: 4, fontSize: 10, color: palette.info, backgroundColor: palette.infoBg },
   warning: { paddingHorizontal: 9, paddingVertical: 5, fontSize: 10, color: palette.warning, backgroundColor: palette.warningBg },
   error: { paddingHorizontal: 9, paddingVertical: 5, fontSize: 10, color: palette.error },
-  questions: { maxHeight: '40%', backgroundColor: palette.panel },
+  questions: { flexGrow: 0, maxHeight: '40%', backgroundColor: palette.panel },
   questionContent: { gap: 7, padding: 8 },
   promptDock: { gap: 3, marginHorizontal: 6, marginBottom: 2, paddingHorizontal: 6, paddingVertical: 4, borderLeftWidth: 2, borderLeftColor: palette.accent, backgroundColor: palette.backgroundElement },
   promptRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 3 },

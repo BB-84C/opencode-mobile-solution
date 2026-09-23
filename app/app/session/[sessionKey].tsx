@@ -425,7 +425,7 @@ export default function SessionScreen() {
             Machine execution contract {contractState.status} · sending is disabled{contractState.error ? ` · ${contractState.error}` : ''}
           </Text>
         ) : null}
-        {sessionError ? <Text selectable testID="session-load-warning" style={styles.warning}>Transcript refresh warning · {sessionError}</Text> : null}
+        {sessionError ? <Text selectable testID="session-load-warning" style={styles.warning}>{sessionError}</Text> : null}
         {olderMessageLoadState === 'loading' ? <Text testID="session-older-loading" style={styles.notice}>Loading older messages…</Text> : null}
         {olderMessageError ? <Text selectable testID="session-older-error" style={styles.warning}>Older transcript warning · {olderMessageError}</Text> : null}
         {actionError ? <Text selectable testID="session-action-error" style={styles.error}>{actionError}</Text> : null}

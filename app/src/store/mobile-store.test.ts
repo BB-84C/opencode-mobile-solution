@@ -1042,3 +1042,38 @@ function jsonResponse(body: unknown, status = 200, responseHeaders: Record<strin
 function emptyResponse(status = 204) {
   return new Response(null, { status });
 }
+
+describe('error events from the machine', () => {
+  it('reads the message out of the shape the server actually sends', async () => {
+    // A failed turn arrives as an event, not as a failed request. The server's
+    // shape is { name, data: { message } }.
+    const { serverEventErrorText } = await import('./mobile-store');
+
+    expect(serverEventErrorText({
+      error: { name: 'UnknownError', data: { message: 'model gpt-9 is not available' } },
+    })).toBe('model gpt-9 is not available');
+  });
+
+  it('falls back through the shapes an older or newer server might use', async () => {
+    const { serverEventErrorText } = await import('./mobile-store');
+
+    expect(serverEventErrorText({ error: { message: 'boom' } })).toBe('boom');
+    expect(serverEventErrorText({ message: 'flat message' })).toBe('flat message');
+    expect(serverEventErrorText({ error: { name: 'RateLimited' } })).toBe('RateLimited');
+  });
+
+  it('says something rather than nothing when the shape is unrecognised', async () => {
+    // Silence is the bug being fixed: an unreadable error must not read as
+    // "the machine simply produced no output".
+    const { serverEventErrorText } = await import('./mobile-store');
+
+    expect(serverEventErrorText({ error: { code: 42 } })).toContain('no description');
+  });
+
+  it('ignores an empty string, which would otherwise render as no error at all', async () => {
+    const { serverEventErrorText } = await import('./mobile-store');
+
+    expect(serverEventErrorText({ error: { message: '   ', name: 'ProviderError' } }))
+      .toBe('ProviderError');
+  });
+});

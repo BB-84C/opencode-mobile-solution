@@ -1722,12 +1722,42 @@ function applySessionUpdate(state: MobileStore, ref: SessionRef, session: Sessio
   };
 }
 
+/**
+ * Pulls a readable sentence out of an error event.
+ *
+ * The server reports a failed turn as an event, not as a failed request, so a
+ * model that cannot run produced no message, no status change the app noticed,
+ * and nothing on screen. Its shape is `{ name, data: { message } }`, but an
+ * unrecognised one must still say something rather than fall back to silence.
+ */
+export function serverEventErrorText(properties: Record<string, unknown>): string {
+  const candidates = [properties.error, properties.data, properties];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const record = candidate as Record<string, unknown>;
+    const data = record.data && typeof record.data === 'object' ? record.data as Record<string, unknown> : undefined;
+    const message = [data?.message, record.message, record.name]
+      .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    if (message) return message;
+  }
+  return 'The machine reported an error with no description.';
+}
+
 function applyServerEvent(state: MobileStore, scopeRef: SessionRef, event: ServerEvent): Partial<MobileStore> {
   const properties = recordValue(event.properties);
   if (!properties) return {};
   const sessionId = sessionIdFromServerEvent(event);
   const ref = sessionId ? { ...scopeRef, sessionId } : scopeRef;
   const key = sessionStateKey(ref);
+
+  if (event.type === 'session.error' || event.type === 'message.error') {
+    const text = serverEventErrorText(properties);
+    return {
+      sessionErrors: { ...state.sessionErrors, [key]: text },
+      // Leave the session marked busy and the spinner never stops.
+      sessionStatuses: { ...state.sessionStatuses, [key]: { type: 'idle' as const } },
+    };
+  }
 
   if (event.type === 'question.asked') {
     const request = properties as unknown as QuestionRequest;

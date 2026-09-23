@@ -95,7 +95,8 @@ The agent did not submit any permission decision.
   At 15:33, the final iPhone screenshot of the `/var/tmp/*` request confirmed
   the permission card now ends directly above the composer, without the earlier
   large blank region. The longer command and all three decision buttons remained
-  visible. This candidate has not been uploaded to TestFlight.
+  visible. At the time of this device check, the candidate had not yet been
+  uploaded. It was later released as [TestFlight 1.0.3 (4)](testflight-1.0.3-release.md).
 
 The final phone status rounds at 15:34 and 15:35 showed 876 root sessions and
 no Sync Warning. The unchecked Woody directory count decreased **45 → 24**

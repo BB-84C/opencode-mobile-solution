@@ -36,6 +36,7 @@ export default function SessionsScreen() {
     refreshActiveHost,
     subscribeToActiveHost,
     unsubscribeFromHost,
+    openCommandPalette,
   } = useOpenCodeMobileStore(useShallow((state) => ({
     activeConnectionId: state.activeConnectionId,
     hydrated: state.hydrated,
@@ -51,6 +52,7 @@ export default function SessionsScreen() {
     refreshActiveHost: state.refreshActiveHost,
     subscribeToActiveHost: state.subscribeToActiveHost,
     unsubscribeFromHost: state.unsubscribeFromHost,
+    openCommandPalette: state.openCommandPalette,
   })));
   const [query, setQuery] = useState('');
   const debouncedQuery = useDebouncedValue(query, 150);
@@ -189,6 +191,14 @@ export default function SessionsScreen() {
                 ) : (
                   <SymbolView name={{ ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' }} tintColor={palette.text} size={18} />
                 )}
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Commands"
+                testID="sessions-commands-button"
+                style={styles.iconButton}
+                onPress={() => openCommandPalette()}>
+                <SymbolView name={{ ios: 'command', android: 'apps', web: 'apps' }} tintColor={palette.text} size={18} />
               </Pressable>
               <Pressable
                 accessibilityRole="button"

@@ -1,0 +1,6 @@
+node_modules/
+renderer/
+dist/
+
+# Derived icon containers, rebuilt by scripts/build-icons.mjs on every package.
+build/

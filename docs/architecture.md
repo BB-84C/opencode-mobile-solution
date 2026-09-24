@@ -22,16 +22,17 @@ HTTP Basic auth (`OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD`). The
 local launcher in `clients/` starts this backend once and attaches disposable
 TUIs to it, so the phone and the desktop share the same live sessions.
 
-## 2. Transport — SSH reverse tunnel or FRP
+## 2. Transport — Tailscale
 
-The backend is not exposed to the internet directly. A tunnel forwards it to the
-relay host:
+The backend is not exposed to the internet, and there is no tunnel to maintain.
+The relay runs on the same host as the backends and binds loopback only; remote
+devices reach it over a Tailscale network, which also terminates TLS for the
+host's `*.ts.net` name. Every machine in the topology is a tailnet node, so
+there is no public listener, no port forwarding, and no certificate to renew by
+hand.
 
-- **SSH reverse tunnel** — `ssh -N -R 4096:localhost:4096 your-vps`. Simple; one
-  backend per remote port.
-- **FRP** — an SSH local-forward to the FRP server plus an `frpc` client. This is
-  the recommended path on Windows and supports multiple named machine targets on
-  distinct remote ports.
+Running several backends on one host needs no extra transport: each backend is
+another loopback port registered as its own relay target.
 
 ## 3. Relay — `relay/relay.mjs`
 
@@ -96,11 +97,11 @@ The `clients/` wrapper classifies the first argument:
 
 ## Security model
 
-- Credentials (device and machine bearers) are stored only as hashes; raw values
-  are returned once.
-- The relay binds to loopback; TLS is the proxy's responsibility.
-- `tokens.json`, `passkeys.json`, `machine.json`, `frpc.toml`, and `*.env` hold
-  live secrets and are git-ignored.
+- Device bearer credentials are stored only as hashes; raw values are returned
+  once.
+- The relay binds to loopback; TLS belongs to the tailnet layer.
+- `tokens.json`, `passkeys.json`, and `*.env` hold live secrets and are
+  git-ignored.
 - Authorization headers are stripped from all relay logs.
 - The first-registration bootstrap secret stops working once the first passkey
   exists.

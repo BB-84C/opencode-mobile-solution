@@ -20,9 +20,6 @@ Environment=OC_PORT=4096
 Environment=TOKENS_PATH=/etc/opencode-relay/tokens.json
 Environment=TOKEN_RELOAD_SEC=60
 Environment=PASSKEY_STATE_PATH=/etc/opencode-relay/passkeys.json
-Environment=FRPS_CONFIG_PATH=/etc/frp/frps.toml
-Environment=MACHINE_REMOTE_PORT_MIN=4100
-Environment=MACHINE_REMOTE_PORT_MAX=4199
 EnvironmentFile=-/etc/opencode-relay/relay.env
 UMask=0077
 TimeoutStopSec=30s
@@ -38,7 +35,7 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/etc/opencode-relay
-ReadOnlyPaths=/opt/opencode-relay /etc/frp/frps.toml
+ReadOnlyPaths=/opt/opencode-relay
 RestrictAddressFamilies=AF_INET AF_INET6
 RestrictRealtime=yes
 MemoryMax=128M

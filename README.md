@@ -1,5 +1,15 @@
 # OpenCode Remote
 
+## 这是什么
+
+把跑在自己电脑上的 OpenCode 会话，带到手机和另一台电脑上。
+
+一台常开的主机跑 OpenCode 后端，中继在前面做鉴权和分流，客户端通过 Tailscale 内网连过来——不开公网端口，不经第三方服务器，凭证在自己手里。手机上能看同一批会话、发指令、看回复；换到桌面客户端是同一套界面，多一套键盘操作。一台主机可以挂多台机器，一个客户端也可以同时连多台主机。
+
+**项目来自朋友 [BB-84C](https://github.com/BB-84C) 的 [opencode-mobile-solution](https://github.com/BB-84C/opencode-mobile-solution)**，这个分支在它的中继和手机端之上，改成了 tailnet 直连、加了 macOS 一键部署和 Electron 桌面端，去掉了原本的 VPS / 内网穿透那条路。应用图标也是他的作品，经本人同意后沿用。
+
+## In English
+
 A template for reaching your own [OpenCode](https://github.com/anomalyco/opencode)
 sessions from a phone or another machine. It is a starting kit, not a hosted
 service: you supply your own domain, tokens, and credentials.
@@ -42,22 +52,19 @@ replace with your own.
 
 ## Quick start
 
-1. **Relay** — deploy the service to your host and expose it with a reverse
-   proxy. See [`relay/README.md`](relay/README.md), with a deploy helper in
-   [`relay/deploy/`](relay/deploy) and proxy examples in
-   [`relay/reverse-proxy/`](relay/reverse-proxy).
+1. **Relay** — run the service on the host that owns the backends. See
+   [`relay/README.md`](relay/README.md); proxy examples live in
+   [`relay/reverse-proxy/`](relay/reverse-proxy). Remote access is Tailscale's
+   job, so nothing here is exposed to the public internet.
 2. **App** — set your own identifiers in `app/app.json`, then build and run. See
    [`app/README.md`](app/README.md).
-3. **Local launcher** — install the wrapper so `opencode` attaches to the shared
-   backend. See [`clients/windows/README.md`](clients/windows/README.md) or
-   [`clients/macos/README.md`](clients/macos/README.md).
 
 ## Security notes
 
-- The relay stores only SHA-256 hashes of device and machine credentials. Raw
-  credentials are returned once and never written to disk.
-- `tokens.json`, `passkeys.json`, `machine.json`, `frpc.toml`, and `*.env` hold
-  live secrets. They are git-ignored here; keep them that way.
+- The relay stores only SHA-256 hashes of device credentials. Raw credentials
+  are returned once and never written to disk.
+- `tokens.json`, `passkeys.json`, and `*.env` hold live secrets. They are
+  git-ignored here; keep them that way.
 - Rotate any credential that has ever been committed, printed, or shared.
 - The relay listens only on `127.0.0.1`; TLS is the reverse proxy's job.
 

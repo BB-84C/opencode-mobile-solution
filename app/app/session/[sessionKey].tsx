@@ -64,6 +64,7 @@ import {
   type QuestionPromptPayload,
 } from '@/src/ux/session-interactions';
 import { createSessionSubagentListModel } from '@/src/ux/session-subagents';
+import { useDesktopContext, useScreenActions } from '@/src/ux/use-desktop-shell';
 import {
   growTranscriptWindow,
   INITIAL_TRANSCRIPT_WINDOW,
@@ -119,6 +120,7 @@ export default function SessionScreen() {
     setSessionVariant: state.setSessionVariant,
     togglePromptMode: state.togglePromptMode,
     requestInterrupt: state.requestInterrupt,
+    deleteSession: state.deleteSession,
   })));
   const [prompt, setPrompt] = useState('');
   const [actionError, setActionError] = useState<string | null>(null);
@@ -129,6 +131,7 @@ export default function SessionScreen() {
   const [commandsVisible, setCommandsVisible] = useState(false);
   const [hierarchyVisible, setHierarchyVisible] = useState(false);
   const [subagentsVisible, setSubagentsVisible] = useState(false);
+  const [deleteVisible, setDeleteVisible] = useState(false);
   const [renameVisible, setRenameVisible] = useState(false);
   const [renameTitle, setRenameTitle] = useState('');
   const [renameSubmitting, setRenameSubmitting] = useState(false);
@@ -138,6 +141,39 @@ export default function SessionScreen() {
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const [transcriptWindowSize, setTranscriptWindowSize] = useState(INITIAL_TRANSCRIPT_WINDOW);
   const transcriptRef = useRef<VirtualizedTranscriptHandle>(null);
+
+  // The diff belongs to this session, so it is addressed by route rather than
+  // read from whichever session happens to be active when the page opens.
+  const openDiffs = useCallback(() => {
+    if (!ref) return;
+    router.push({
+      pathname: '/diff-preview',
+      params: { connectionId: ref.connectionId, machine: ref.relayTargetID ?? '', session: ref.sessionId },
+    });
+  }, [ref]);
+
+  useDesktopContext('messages');
+
+  // Scrolling needs the list itself, so the desktop shell cannot do it from the
+  // store. Claim these only while this screen is mounted.
+  useScreenActions({
+    'scroll-page-up': () => { transcriptRef.current?.scroll('page-up'); },
+    'scroll-page-down': () => { transcriptRef.current?.scroll('page-down'); },
+    'scroll-half-page-up': () => { transcriptRef.current?.scroll('half-page-up'); },
+    'scroll-half-page-down': () => { transcriptRef.current?.scroll('half-page-down'); },
+    'scroll-to-first': () => { transcriptRef.current?.scroll('to-oldest'); },
+    'scroll-to-last': () => { transcriptRef.current?.scroll('to-latest'); },
+    'entrypoint:diffs': () => openDiffs(),
+    // These surfaces existed but answered to no key, so every shortcut that
+    // meant to open one reported itself unwired.
+    'entrypoint:commands': () => setCommandsVisible(true),
+    'entrypoint:session-details': () => setMenuVisible(true),
+    'entrypoint:subagents': () => setSubagentsVisible(true),
+    'model-list': () => setModelVisible(true),
+    'child-session-next': () => setHierarchyVisible(true),
+    'child-session-previous': () => setHierarchyVisible(true),
+    'parent-session': () => setHierarchyVisible(true),
+  });
 
   const activeHost = ref ? store.connections.find((connection) => connection.id === ref.connectionId) : undefined;
   const hostSessions = ref ? store.sessions[ref.connectionId] ?? [] : [];
@@ -394,7 +430,7 @@ export default function SessionScreen() {
             Machine execution contract {contractState.status} · sending is disabled{contractState.error ? ` · ${contractState.error}` : ''}
           </Text>
         ) : null}
-        {sessionError ? <Text selectable testID="session-load-warning" style={styles.warning}>Transcript refresh warning · {sessionError}</Text> : null}
+        {sessionError ? <Text selectable testID="session-load-warning" style={styles.warning}>{sessionError}</Text> : null}
         {olderMessageLoadState === 'loading' ? <Text testID="session-older-loading" style={styles.notice}>Loading older messages…</Text> : null}
         {olderMessageError ? <Text selectable testID="session-older-error" style={styles.warning}>Older transcript warning · {olderMessageError}</Text> : null}
         {actionError ? <Text selectable testID="session-action-error" style={styles.error}>{actionError}</Text> : null}
@@ -413,6 +449,17 @@ export default function SessionScreen() {
             onBottomStateChange={setTranscriptAtBottom}
             onOlderEndReached={revealOlderTranscript}
           />
+          {renderedTranscript.length > 0 ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Scroll to the first message"
+              testID="session-scroll-to-top"
+              style={styles.scrollToTop}
+              onPress={() => transcriptRef.current?.scroll('to-oldest')}>
+              <SymbolView name={{ ios: 'arrow.up', android: 'arrow_upward', web: 'arrow_upward' }} tintColor={palette.text} size={15} />
+              <Text style={styles.scrollToTopText}>Top</Text>
+            </Pressable>
+          ) : null}
           {!transcriptAtBottom ? (
             <Pressable
               accessibilityRole="button"
@@ -538,6 +585,7 @@ export default function SessionScreen() {
           items={[
             { id: 'hierarchy', label: 'Conversation tree', detail: `${node.children.length} child session${node.children.length === 1 ? '' : 's'}`, onPress: () => setHierarchyVisible(true) },
             { id: 'commands', label: 'Commands', detail: `${contract?.commands.length ?? 0} from this machine`, onPress: () => setCommandsVisible(true) },
+            { id: 'diffs', label: 'Changed files', detail: 'Files this session edited, with the lines added and removed', onPress: () => openDiffs() },
             { id: 'subagents', label: 'Subagents', detail: `${subagents.entries.length} transcript${subagents.entries.length === 1 ? '' : 's'}`, onPress: () => setSubagentsVisible(true) },
             { id: 'rename', label: 'Rename', onPress: () => { setRenameTitle(session.title ?? ''); setRenameVisible(true); } },
             { id: 'share', label: 'Copy share link', onPress: async () => { const url = await store.shareSession(ref); if (url) await Clipboard.setStringAsync(url); } },
@@ -548,6 +596,27 @@ export default function SessionScreen() {
             { id: 'export', label: 'Export transcript', onPress: async () => Clipboard.setStringAsync(createSessionExportArtifact({ session, messages: transcript })) },
             { id: 'toggle-actions', label: showActions ? 'Hide message actions' : 'Show message actions', onPress: () => setShowActions((value) => !value) },
             { id: 'toggle-time', label: showTimestamps ? 'Hide timestamps' : 'Show timestamps', onPress: () => setShowTimestamps((value) => !value) },
+            { id: 'delete-session', label: 'Delete session', detail: 'Asks again before anything is removed', danger: true, onPress: () => setDeleteVisible(true) },
+          ]}
+        />
+
+        <ActionModal
+          title="Delete session?"
+          visible={deleteVisible}
+          onClose={() => setDeleteVisible(false)}
+          onActionError={reportError}
+          items={[
+            {
+              id: 'delete-confirm',
+              label: 'Delete permanently',
+              detail: `"${session.title ?? session.id}" is removed on ${session.relayTargetName ?? 'the machine that owns it'}, for every device`,
+              danger: true,
+              onPress: async () => {
+                await store.deleteSession(ref);
+                router.replace('/(tabs)/two');
+              },
+            },
+            { id: 'delete-cancel', label: 'Keep this session', onPress: () => undefined },
           ]}
         />
 
@@ -735,6 +804,8 @@ const styles = StyleSheet.create({
   subtitle: { fontSize: 10, lineHeight: 13, color: palette.textMuted },
   transcriptFrame: { flex: 1, position: 'relative' },
   transcript: { flex: 1 },
+  scrollToTop: { position: 'absolute', right: 10, bottom: 52, minHeight: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingHorizontal: 12, borderRadius: 18, borderWidth: 1, borderColor: palette.borderSubtle, backgroundColor: palette.backgroundPanel },
+  scrollToTopText: { fontSize: 12, fontWeight: '800', color: palette.text },
   scrollToLatest: { position: 'absolute', right: 10, bottom: 10, minHeight: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingHorizontal: 12, borderRadius: 18, backgroundColor: palette.primary },
   scrollToLatestText: { fontSize: 12, fontWeight: '800', color: palette.foregroundOnAccent },
   notice: { paddingHorizontal: 9, paddingVertical: 4, fontSize: 10, color: palette.info, backgroundColor: palette.infoBg },

@@ -155,6 +155,10 @@ export interface MobileStore {
   diffs: Record<string, FileDiff[]>;
   loading: LoadingState;
   error: string | null;
+  /** Transient keyboard/action feedback. Kept apart from `error`, which screens
+   *  render as a host sync failure. */
+  notice: string | null;
+  commandPaletteOpen: boolean;
   hostSyncStates: Record<string, LoadingState>;
   hostSyncErrors: Record<string, string | null>;
   hostSyncNotes: Record<string, string | null>;
@@ -179,6 +183,13 @@ export interface MobileStore {
   removeConnection(id: string): Promise<void>;
   setActiveConnection(id: string): boolean;
   clearActiveConnection(): void;
+  /** Removes a session on the machine that owns it. Deliberately not bound to
+   *  any key: a satellite device should not be one keystroke from deleting work. */
+  deleteSession(input: SessionRef | string): Promise<void>;
+  showNotice(message: string): void;
+  dismissNotice(): void;
+  openCommandPalette(): void;
+  closeCommandPalette(): void;
   refreshActiveHost(options?: { background?: boolean }): Promise<void>;
   subscribeToActiveHost(): void;
   unsubscribeFromHost(connectionId: string): void;
@@ -186,6 +197,19 @@ export interface MobileStore {
   loadOlderMessages(ref: SessionInput): Promise<void>;
   searchFileReferences(query: string, ref?: SessionInput): Promise<FileReference[]>;
   startNewSessionPrompt(): void;
+  createSession(input: {
+    connectionId: string;
+    relayTargetID?: string;
+    directory?: string;
+    title?: string;
+  }): Promise<SessionRef | null>;
+  /** Fetches a machine's agents and providers without needing a session there,
+   *  so a new-session form has real lists on a fresh install. */
+  loadMachineContract(input: {
+    connectionId: string;
+    relayTargetID?: string;
+    directory?: string;
+  }): Promise<boolean>;
   sendPrompt(text: string): Promise<string | null>;
   /** Removes legacy records; it never dispatches them. */
   flushQueuedPrompts(connectionId?: string): Promise<void>;
@@ -292,6 +316,8 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
   diffs: {},
   loading: 'idle',
   error: null,
+  notice: null,
+  commandPaletteOpen: false,
   hostSyncStates: {},
   hostSyncErrors: {},
   interruptArmedAt: {},
@@ -512,6 +538,22 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
       error: null,
     });
     return true;
+  },
+
+  showNotice(message) {
+    set({ notice: message });
+  },
+
+  dismissNotice() {
+    set({ notice: null });
+  },
+
+  openCommandPalette() {
+    set({ commandPaletteOpen: true });
+  },
+
+  closeCommandPalette() {
+    set({ commandPaletteOpen: false });
   },
 
   clearActiveConnection() {
@@ -754,7 +796,55 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
   },
 
   startNewSessionPrompt() {
-    set({ error: 'OpenCode Mobile controls existing sessions and does not create sessions.' });
+    // Creation itself lives in createSession; this only clears a stale banner so
+    // the screen that offers the choices opens on a clean slate.
+    set({ error: null });
+  },
+
+  async loadMachineContract({ connectionId, relayTargetID, directory }) {
+    const connection = get().connections.find((item) => item.id === connectionId);
+    if (!connection) return false;
+    const client = clientFor(connection, relayTargetID);
+    const query = directory ? { directory } : {};
+    const [agentsResult, providersResult, configResult, commandsResult] = await Promise.allSettled([
+      client.listAgents(query),
+      client.listConfiguredProviders ? client.listConfiguredProviders(query) : Promise.resolve(undefined),
+      client.getConfig ? client.getConfig(query) : Promise.resolve(undefined),
+      client.listCommands(query),
+    ]);
+    if (agentsResult.status !== 'fulfilled' || providersResult.status !== 'fulfilled') return false;
+
+    const ref: SessionRef = { connectionId, relayTargetID: relayTargetID ?? '', sessionId: '' };
+    const contract = buildMachineContract({
+      ref,
+      session: { id: '', directory } as Session,
+      agents: agentsResult.value,
+      providers: providersResult.value,
+      config: fulfilledOr(configResult, undefined),
+      commands: fulfilledOr(commandsResult, []),
+    });
+    if (!contract) return false;
+
+    const scopeKey = executionScopeKey(ref, directory);
+    set((state) => ({ machineContracts: { ...state.machineContracts, [scopeKey]: contract } }));
+    return true;
+  },
+
+  async createSession({ connectionId, relayTargetID, directory, title }) {
+    const connection = get().connections.find((item) => item.id === connectionId);
+    if (!connection) {
+      set({ error: 'Select a host before creating a session.' });
+      return null;
+    }
+    try {
+      const session = await clientFor(connection, relayTargetID).createSession(title, directory);
+      const ref = sessionRefFor(connectionId, { ...session, relayTargetID });
+      set((state) => applySessionUpdate(state, ref, session));
+      return ref;
+    } catch (error) {
+      set({ error: errorMessage(error) });
+      return null;
+    }
   },
 
   async sendPrompt(text) {
@@ -839,8 +929,35 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
       set({ error: errorMessage(error) });
       return null;
     }
-    set({ error: 'OpenCode Mobile controls existing sessions and does not create or fork sessions.' });
-    return null;
+    const { ref, connection } = requireSessionContext(input, get());
+    try {
+      const forked = await clientFor(connection, ref.relayTargetID).forkSession(ref.sessionId, _messageId);
+      const forkedRef = sessionRefFor(ref.connectionId, { ...forked, relayTargetID: ref.relayTargetID });
+      set((state) => applySessionUpdate(state, forkedRef, forked));
+      return forkedRef.sessionId;
+    } catch (error) {
+      set({ error: errorMessage(error) });
+      return null;
+    }
+  },
+
+  async deleteSession(input) {
+    const { ref, session } = requireSessionContext(input, get());
+    const connection = get().connections.find((item) => item.id === ref.connectionId);
+    if (!connection) throw new Error('That session belongs to a host this device no longer has.');
+    await clientFor(connection, ref.relayTargetID).deleteSession(ref.sessionId, { directory: session.directory });
+    const key = sessionStateKey(ref);
+    set((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ref.connectionId]: (state.sessions[ref.connectionId] ?? []).filter((item) => item.id !== ref.sessionId),
+      },
+      sessionStatuses: omitRecordKey(state.sessionStatuses, key),
+      ...(state.activeSessionKey === key
+        ? { activeSessionRef: null, activeSessionKey: null, activeSessionId: null }
+        : {}),
+    }));
+    set((state) => ({ projects: { ...state.projects, [ref.connectionId]: groupSessionsByDirectory(state.sessions[ref.connectionId] ?? []) } }));
   },
 
   async compactSession(input) {
@@ -1780,6 +1897,27 @@ function applySessionUpdate(state: MobileStore, ref: SessionRef, session: Sessio
   };
 }
 
+/**
+ * Pulls a readable sentence out of an error event.
+ *
+ * The server reports a failed turn as an event, not as a failed request, so a
+ * model that cannot run produced no message, no status change the app noticed,
+ * and nothing on screen. Its shape is `{ name, data: { message } }`, but an
+ * unrecognised one must still say something rather than fall back to silence.
+ */
+export function serverEventErrorText(properties: Record<string, unknown>): string {
+  const candidates = [properties.error, properties.data, properties];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const record = candidate as Record<string, unknown>;
+    const data = record.data && typeof record.data === 'object' ? record.data as Record<string, unknown> : undefined;
+    const message = [data?.message, record.message, record.name]
+      .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    if (message) return message;
+  }
+  return 'The machine reported an error with no description.';
+}
+
 function applyServerEvent(state: MobileStore, scopeRef: SessionRef, event: ServerEvent): Partial<MobileStore> {
   const properties = recordValue(event.properties);
   if (!properties) return {};
@@ -1787,6 +1925,14 @@ function applyServerEvent(state: MobileStore, scopeRef: SessionRef, event: Serve
   const ref = sessionId ? { ...scopeRef, sessionId } : scopeRef;
   const key = sessionStateKey(ref);
 
+  if (event.type === 'session.error' || event.type === 'message.error') {
+    const text = serverEventErrorText(properties);
+    return {
+      sessionErrors: { ...state.sessionErrors, [key]: text },
+      // Leave the session marked busy and the spinner never stops.
+      sessionStatuses: { ...state.sessionStatuses, [key]: { type: 'idle' as const } },
+    };
+  }
   if (event.type === 'permission.asked') {
     const request = properties as unknown as PermissionRequest;
     if (!request.id || !request.sessionID || !request.permission || !Array.isArray(request.patterns)) return {};
@@ -2163,8 +2309,19 @@ function sessionIdFromServerEvent(event: ServerEvent) {
     ?? (event.type.startsWith('session.') ? stringValue(info?.id) : undefined);
 }
 
+// The relay answers a rejected path with a bare token. Shown as-is it reads as
+// a demand for a directory rather than as "that path is not one".
+const RELAY_ERROR_TEXT: Record<string, string> = {
+  directory_forbidden: 'That working directory is not usable on this machine. Pick one of the offered directories, or leave it empty to use the machine default. Paths must be absolute, and "~" is not expanded.',
+  target_forbidden: 'This device is not authorized for that machine.',
+};
+
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
+  const raw = error instanceof Error ? error.message : String(error);
+  for (const [token, text] of Object.entries(RELAY_ERROR_TEXT)) {
+    if (raw.includes(token)) return text;
+  }
+  return raw;
 }
 
 function summarizeSyncIssues(issues: string[]) {

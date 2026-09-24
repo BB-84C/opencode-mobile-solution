@@ -17,13 +17,16 @@ test('service defines matching credential, reload, and shutdown directives', asy
     'Environment=TOKENS_PATH=/etc/opencode-relay/tokens.json',
     'Environment=TOKEN_RELOAD_SEC=60',
     'Environment=PASSKEY_STATE_PATH=/etc/opencode-relay/passkeys.json',
-    'Environment=FRPS_CONFIG_PATH=/etc/frp/frps.toml',
     'EnvironmentFile=-/etc/opencode-relay/relay.env',
     'UMask=0077',
     'MemoryMax=128M',
     'TimeoutStopSec=30s',
     'ReadWritePaths=/etc/opencode-relay',
   ]) assert.match(service, new RegExp(`^${directive.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+
+  // The unit must not carry configuration for a transport the relay no longer
+  // speaks: a stale FRP path would suggest the tunnel is still wired up.
+  assert.doesNotMatch(service, /FRPS_CONFIG_PATH|MACHINE_REMOTE_PORT/);
 });
 
 test('README documents proxy deployment without sync metadata or route handling', async () => {

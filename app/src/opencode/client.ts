@@ -404,11 +404,14 @@ export class OpenCodeClient implements OpenCodeClientLike {
     return this.request<TodoItem[]>(`/session/${encodeURIComponent(sessionId)}/todo`);
   }
 
-  createSession(title = 'New Session', directory?: string) {
+  // Do not invent a default title. The server auto-names a session only while
+  // its title still matches `New session - <ISO>` (`isDefaultTitle` in the
+  // OpenCode core), so any literal we send here disables auto-naming for good.
+  createSession(title?: string, directory?: string) {
     if (!directory) throw new Error('OpenCode session creation requires a directory');
     return this.request<Session>(`/session${directory ? workspaceQuery({ directory }) : ''}`, {
       method: 'POST',
-      body: { title },
+      body: title === undefined ? {} : { title },
       directory,
     });
   }

@@ -76,22 +76,82 @@ IPv6 用不了、全程走中继时，还要再做一步 `skip-proxy`，见文�
 
 ## Windows：Clash Verge
 
-先确认工作模式，两种要做的事不同，一起做也无妨。
+要做两件事。规则写进全局扩展脚本，TUN 模式和系统代理模式都需要；绕过列表只管系统代理模式。
 
-**TUN 模式**会接管路由表，和 Shadowrocket 同类。用 Merge 类型的扩展配置注入规则，
-这样订阅更新不会冲掉：
+### 全局扩展脚本：换订阅也不丢
 
-```yaml
-prepend-rules:
-  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
-  - IP-CIDR6,fd7a:115c:a1e0::/48,DIRECT,no-resolve
-  - DOMAIN-SUFFIX,ts.net,DIRECT
+规则不能写进订阅本身，订阅一更新就被覆盖，换一家服务商更是从零开始。
+2026-10-30 换了服务商之后就是这样：新订阅的规则表里没有 `ts.net`，
+经代理端口访问 `<主机>.<tailnet>.ts.net` 的请求被交给远端节点，而远端节点进不了 tailnet。
+
+Clash Verge Rev 的「订阅 → 全局扩展脚本」对每一份订阅都生效，生成配置时执行一次，
+订阅更新、切换订阅、换节点都不影响它。把内容整个换成下面这段：
+
+```js
+function main(config, profileName) {
+  var TAILNET_RULES = [
+    "DOMAIN-SUFFIX,ts.net,DIRECT",
+    "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve",
+    "IP-CIDR6,fd7a:115c:a1e0::/48,DIRECT,no-resolve",
+    "PROCESS-NAME,tailscaled.exe,DIRECT",
+    "PROCESS-NAME,tailscale-ipn.exe,DIRECT",
+    "PROCESS-NAME,tailscale.exe,DIRECT"
+  ];
+  var MAGIC_DNS = "100.100.100.100";
+
+  var rules = Array.isArray(config.rules) ? config.rules : [];
+  config.rules = TAILNET_RULES.concat(rules.filter(function (rule) {
+    return TAILNET_RULES.indexOf(rule) === -1;
+  }));
+
+  var dns = config.dns;
+  if (dns && typeof dns === "object") {
+    var policy = dns["nameserver-policy"];
+    if (!policy || typeof policy !== "object" || Array.isArray(policy)) policy = {};
+    if (!policy["+.ts.net"]) policy["+.ts.net"] = MAGIC_DNS;
+    dns["nameserver-policy"] = policy;
+
+    var mode = dns["fake-ip-filter-mode"] || "blacklist";
+    var filter = Array.isArray(dns["fake-ip-filter"]) ? dns["fake-ip-filter"] : [];
+    if (mode === "blacklist" && filter.indexOf("+.ts.net") === -1) filter.push("+.ts.net");
+    if (mode === "rule" && filter.indexOf("DOMAIN-SUFFIX,ts.net,real-ip") === -1) filter.unshift("DOMAIN-SUFFIX,ts.net,real-ip");
+    if (mode !== "whitelist") dns["fake-ip-filter"] = filter;
+  }
+
+  return config;
+}
 ```
 
-`prepend-rules` 会插到规则表最前面。改完在界面里重载配置。
+脚本只往订阅里加东西，不删不改，重复执行结果一样。三处改动各有用处：
 
-**系统代理模式**不碰路由表，问题只在于程序把请求交给了代理服务器。
-在「设置 → 系统代理 → 绕过规则」里加上：
+- 规则表最前面的六条直连。前三条和 Shadowrocket 那三条同义；后三条让 Tailscale 自己的
+  WireGuard、DERP 和控制流量不经过代理节点。
+- `+.ts.net` 交给 MagicDNS（`100.100.100.100`）解析。只有直连规则不够，核心还得解析出
+  `100.x` 地址，而它自己的上游 DNS 不认识 tailnet 里的机器名。
+- `+.ts.net` 加进 fake-ip 排除。TUN 模式下否则会拿到 `198.18.x` 的假地址。
+
+保存后重载配置，或者重启 Clash Verge。用运行中的配置确认生效：
+`%APPDATA%\io.github.clash-verge-rev.clash-verge-rev\clash-verge.yaml` 里 `rules:`
+下面头一条应当是 `DOMAIN-SUFFIX,ts.net,DIRECT`。再从代理端口走一遍（端口见「设置 → 端口」，默认 7897）：
+
+```
+curl.exe -x http://127.0.0.1:7897 -s -o NUL -w "%{http_code}\n" --max-time 20 https://<主机>.<tailnet>.ts.net:8443/health
+```
+
+返回 200 才算通。改之前这条返回 `000`，TLS 握手被远端节点断开。
+
+**不要改用 Merge（全局扩展覆写）。** 早先这里写的是 Merge 加 `prepend-rules`，在
+Clash Verge Rev 2.5.8 上已经失效：Merge 现在只做键值深合并，不认 `prepend-rules`，
+规则表不会因此多出任何一条。而且 Merge 遇到 `dns` 是整块覆盖，
+想往 `fake-ip-filter` 里加一项，会把订阅自带的几十条排除项一起冲掉。脚本能读出订阅原有的列表再追加，
+所以用脚本。以上在 2.5.8 上实测，并对照了它的 `enhance/merge.rs` 源码。
+
+TUN 的配置这次没有在 TUN 开启状态下实测，只在离线演算里确认了生成结果。
+
+### 系统代理模式：绕过列表
+
+系统代理模式不碰路由表，浏览器和 Electron 桌面分机先看系统代理的绕过列表，
+命中的请求根本不进 Clash。在「设置 → 系统代理 → 绕过规则」里加上：
 
 ```
 *.ts.net;100.*
@@ -99,6 +159,9 @@ prepend-rules:
 
 Windows 的绕过列表不认 CIDR，只认通配符，所以写 `100.*`。它比 `100.64.0.0/10`
 略宽，但该段基本都是 CGNAT 保留地址，实际影响可以忽略。
+
+这一项存在 Clash Verge 自己的设置里，不随订阅变化，所以换服务商后分机照常能用；
+直接把请求交给代理端口的程序不看这个列表，它们靠的是上面的脚本。
 
 同样不要碰 TUN 的 `route-exclude-address`，理由见上一节。
 
@@ -108,6 +171,8 @@ Windows 的绕过列表不认 CIDR，只认通配符，所以写 `100.*`。它�
 
 原因是 curl、wget 这类工具读的是环境变量，不看系统代理的绕过列表，也不受
 Shadowrocket 规则影响。请求被交给代理服务器，而代理到不了 tailnet 地址。
+Clash Verge 装了上文的全局扩展脚本后，代理会把这类请求直连出去，不设环境变量也能通；
+设上 `no_proxy` 仍然更稳，请求不必绕代理一圈。
 
 ```bash
 export no_proxy="localhost,127.0.0.1,::1,.ts.net"

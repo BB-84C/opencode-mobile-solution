@@ -13,7 +13,9 @@ The relay stores only a SHA-256 hash of each paired device credential and transl
 `Authorization: Bearer <device-token>` (from mobile clients) into
 `Authorization: Basic <user:pass>` (to the local OpenCode server) and enforces each
 client's target/directory scope. It runs on your VPS/reverse-proxy host, behind Caddy or
-nginx.
+nginx (the VPS route below), or on the same machine as the backends, published to a
+Tailscale network (the tailnet route, see [Tailnet host](#tailnet-host)). The relay code is
+the same for both; only where it runs and how clients reach it differ.
 
 ---
 
@@ -228,6 +230,26 @@ passkey web session. A machine may revoke only its own credential through the
 authenticated DELETE endpoint.
 
 ---
+
+## Tailnet host
+
+Instead of a VPS, the relay can run on the always-on machine that also runs the
+backends, and clients reach it over a Tailscale network. There is no tunnel, no public
+listener and no certificate to manage: `tailscale serve` terminates HTTPS with a
+certificate it issues and renews itself, and it does not buffer event streams.
+
+[`host/deploy-macos.sh`](../host/deploy-macos.sh) does the whole setup on macOS: it
+installs one or more `opencode serve` backends and this relay as launchd jobs, writes
+`tokens.json` with each backend as a static target, and runs
+
+```bash
+tailscale serve --bg --https=8443 http://127.0.0.1:4097
+```
+
+Clients then use `https://<machine>.<tailnet>.ts.net:8443`. Machine enrollment, FRP and
+the `clients/` launchers are not used on this route; static targets in `tokens.json`
+are enough, and every enrollment feature stays available for the VPS route. See
+[`host/README.md`](../host/README.md).
 
 ## Environment Variables
 

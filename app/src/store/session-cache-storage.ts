@@ -123,7 +123,7 @@ export function selectCacheableTranscript(messages: readonly MessageWithParts[])
   let jsonChars = 2;
 
   for (let index = messages.length - 1; index >= 0 && selected.length < MAX_CACHED_TRANSCRIPT_MESSAGES; index -= 1) {
-    const message = messages[index];
+    const message = withoutInlineFileData(messages[index]);
     let serialized: string;
     try {
       serialized = JSON.stringify(message);
@@ -138,6 +138,24 @@ export function selectCacheableTranscript(messages: readonly MessageWithParts[])
   }
 
   return selected;
+}
+
+// An attached photo comes back from the server inside its message as a data URL.
+// Caching those bytes would spend the transcript budget on one picture and grow
+// the launch-time cache this module exists to bound; the name and type are
+// enough to show that something was attached.
+function withoutInlineFileData(message: MessageWithParts): MessageWithParts {
+  if (!message.parts.some((part) => part.type === 'file' && typeof part.url === 'string' && part.url.startsWith('data:'))) {
+    return message;
+  }
+  return {
+    ...message,
+    parts: message.parts.map((part) => {
+      if (part.type !== 'file' || typeof part.url !== 'string' || !part.url.startsWith('data:')) return part;
+      const { url: _inline, ...rest } = part;
+      return rest;
+    }),
+  };
 }
 
 function saveSessionCache(snapshot: SessionCacheSnapshot) {

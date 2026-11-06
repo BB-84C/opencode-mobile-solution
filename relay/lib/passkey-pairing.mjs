@@ -5,6 +5,7 @@ import {
   verifyRegistrationResponse,
 } from '@simplewebauthn/server';
 import QRCode from 'qrcode';
+import { preflightHeaders } from './cors.mjs';
 
 import { PairingStore, PairingStoreError } from './pairing-store.mjs';
 import { projectRelayStatus } from './machine-status-monitor.mjs';
@@ -71,8 +72,20 @@ function securityHeaders(contentType) {
   };
 }
 
+// A wildcard origin cannot be combined with credentials by any browser, so this
+// opens the API to bearer-authenticated clients without exposing the console's
+// cookie session to another origin.
+const CROSS_ORIGIN_JSON = {
+  'Access-Control-Allow-Origin': '*',
+  'Cross-Origin-Resource-Policy': 'cross-origin',
+};
+
 function sendJson(res, status, value, headers = {}) {
-  res.writeHead(status, { ...securityHeaders('application/json; charset=utf-8'), ...headers });
+  res.writeHead(status, {
+    ...securityHeaders('application/json; charset=utf-8'),
+    ...CROSS_ORIGIN_JSON,
+    ...headers,
+  });
   res.end(JSON.stringify(value));
 }
 
@@ -1115,13 +1128,13 @@ export function createPasskeyPairing({
         await createPairing(req, res);
         return true;
       }
-      if (route === 'OPTIONS /api/pairing/exchange') {
-        res.writeHead(204, {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'POST,OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type',
-          'Access-Control-Max-Age': '86400',
-        });
+      // An Authorization header is not CORS-safelisted, so even a GET is
+      // preflighted. Covering one route left every other API call unreachable
+      // from a client the relay does not itself serve.
+      if (req.method === 'OPTIONS' && url.pathname.startsWith('/api/')) {
+        // This runs before the proxy's own preflight, so it has to answer with
+        // the same policy or it silently narrows it for every API route.
+        res.writeHead(204, preflightHeaders());
         res.end();
         return true;
       }

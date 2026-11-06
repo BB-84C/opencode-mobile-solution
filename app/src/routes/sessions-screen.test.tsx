@@ -21,6 +21,9 @@ const mocks = vi.hoisted(() => ({
       ],
     },
     sessionStatuses: {},
+    permissions: {} as Record<string, any[]>,
+    questions: {} as Record<string, any[]>,
+    sessionFailures: {} as Record<string, any>,
     loading: 'idle',
     error: null,
     hostSyncErrors: {} as Record<string, string | null>,
@@ -123,6 +126,17 @@ describe('SessionsScreen', () => {
     expect(text(screen)).toContain('Windows build');
     expect(text(screen)).not.toContain('Newest Mac');
     expect(text(screen)).toContain('1 existing session');
+  });
+
+  it('marks a root whose subagent is waiting on a permission', async () => {
+    const childKey = JSON.stringify(['relay', 'mac', 'child']);
+    const rootKey = JSON.stringify(['relay', 'mac', 'mac-new']);
+    mocks.state.permissions = { [childKey]: [{ id: 'per_1', sessionID: 'child', permission: 'bash', patterns: [], metadata: {}, always: [] }] };
+    const screen = await renderScreen();
+    expect(find(screen, `session-waiting-${rootKey}`)).toBeTruthy();
+    expect(text(screen)).toContain('1 waiting for you');
+    expect(all(screen, `session-waiting-${JSON.stringify(['relay', 'mac', 'mac-old'])}`)).toHaveLength(0);
+    mocks.state.permissions = {};
   });
 
   it('deduplicates ten rapid taps synchronously and blocks the list during transition', async () => {

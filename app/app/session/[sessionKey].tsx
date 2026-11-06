@@ -20,9 +20,14 @@ import { useShallow } from 'zustand/react/shallow';
 
 import { ActionModal } from '@/src/components/opencode/ActionModal';
 import { MessageCard } from '@/src/components/opencode/MessageCard';
+import { TranscriptContext } from '@/src/components/opencode/transcript-context';
 import { ModelPickerModal } from '@/src/components/opencode/ModelPickerModal';
 import { QuestionRequestCard } from '@/src/components/opencode/QuestionRequestCard';
 import { PermissionRequestCard } from '@/src/components/opencode/PermissionRequestCard';
+import { TodoPanel } from '@/src/components/opencode/TodoPanel';
+import { TurnErrorBox } from '@/src/components/opencode/TurnErrorBox';
+import { createTodoBoardModel } from '@/src/ux/todo-board';
+import { describeTurnError } from '@/src/ux/turn-error';
 import {
   VirtualizedTranscript,
   type VirtualizedTranscriptHandle,
@@ -41,7 +46,9 @@ import {
   useOpenCodeMobileStore,
 } from '@/src/store/mobile-store';
 import { palette } from '@/src/ui/palette';
+import { pickAttachments, type AttachmentSource } from '@/src/ux/attachment-picker';
 import { appendClipboardText, enterFileReferenceMode } from '@/src/ux/prompt-accessories';
+import { formatAttachmentSize, type PromptAttachment } from '@/src/ux/prompt-attachments';
 import { applyPromptSuggestion, getPromptAssistTrigger } from '@/src/ux/prompt-assist';
 import { createPromptAssistContext } from '@/src/ux/prompt-context';
 import { sortMessagesChronologically } from '@/src/ux/message-order';
@@ -64,11 +71,14 @@ import {
   type QuestionPromptPayload,
 } from '@/src/ux/session-interactions';
 import { createSessionSubagentListModel } from '@/src/ux/session-subagents';
+import { useDesktopContext, useScreenActions } from '@/src/ux/use-desktop-shell';
 import {
   growTranscriptWindow,
   INITIAL_TRANSCRIPT_WINDOW,
   selectTranscriptWindow,
 } from '@/src/ux/transcript-window';
+
+const PENDING_REQUEST_REFRESH_MS = 30_000;
 
 export default function SessionScreen() {
   const { sessionKey: encodedRouteKey } = useLocalSearchParams<{ sessionKey?: string }>();
@@ -92,6 +102,9 @@ export default function SessionScreen() {
     permissionErrors: state.permissionErrors,
     sessionLoadStates: state.sessionLoadStates,
     sessionErrors: state.sessionErrors,
+    sessionFailures: state.sessionFailures,
+    dismissSessionFailure: state.dismissSessionFailure,
+    todos: state.todos,
     eventConnectionStates: state.eventConnectionStates,
     machineContracts: state.machineContracts,
     contractLoadStates: state.contractLoadStates,
@@ -106,6 +119,7 @@ export default function SessionScreen() {
     searchFileReferences: state.searchFileReferences,
     sendPrompt: state.sendPrompt,
     respondToPermission: state.respondToPermission,
+    refreshPendingRequests: state.refreshPendingRequests,
     respondToQuestion: state.respondToQuestion,
     rejectQuestion: state.rejectQuestion,
     revertMessage: state.revertMessage,
@@ -119,6 +133,7 @@ export default function SessionScreen() {
     setSessionVariant: state.setSessionVariant,
     togglePromptMode: state.togglePromptMode,
     requestInterrupt: state.requestInterrupt,
+    deleteSession: state.deleteSession,
   })));
   const [prompt, setPrompt] = useState('');
   const [actionError, setActionError] = useState<string | null>(null);
@@ -129,15 +144,56 @@ export default function SessionScreen() {
   const [commandsVisible, setCommandsVisible] = useState(false);
   const [hierarchyVisible, setHierarchyVisible] = useState(false);
   const [subagentsVisible, setSubagentsVisible] = useState(false);
+  const [deleteVisible, setDeleteVisible] = useState(false);
   const [renameVisible, setRenameVisible] = useState(false);
   const [renameTitle, setRenameTitle] = useState('');
   const [renameSubmitting, setRenameSubmitting] = useState(false);
   const [showActions, setShowActions] = useState(true);
   const [showTimestamps, setShowTimestamps] = useState(false);
+  // The TUI keeps its todo list in a sidebar. Here it is a bar that expands:
+  // open by default on a desktop window, folded on a phone screen.
+  const [todosExpanded, setTodosExpanded] = useState(Platform.OS === 'web');
   const [fileReferences, setFileReferences] = useState<FileReference[]>([]);
+  const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
+  const [attachVisible, setAttachVisible] = useState(false);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const [transcriptWindowSize, setTranscriptWindowSize] = useState(INITIAL_TRANSCRIPT_WINDOW);
   const transcriptRef = useRef<VirtualizedTranscriptHandle>(null);
+
+  // The diff belongs to this session, so it is addressed by route rather than
+  // read from whichever session happens to be active when the page opens.
+  const openDiffs = useCallback(() => {
+    if (!ref) return;
+    router.push({
+      pathname: '/diff-preview',
+      params: { connectionId: ref.connectionId, machine: ref.relayTargetID ?? '', session: ref.sessionId },
+    });
+  }, [ref]);
+
+  useDesktopContext('messages');
+
+  // Scrolling needs the list itself, so the desktop shell cannot do it from the
+  // store. Claim these only while this screen is mounted.
+  useScreenActions({
+    'scroll-page-up': () => { transcriptRef.current?.scroll('page-up'); },
+    'scroll-page-down': () => { transcriptRef.current?.scroll('page-down'); },
+    'scroll-half-page-up': () => { transcriptRef.current?.scroll('half-page-up'); },
+    'scroll-half-page-down': () => { transcriptRef.current?.scroll('half-page-down'); },
+    'scroll-to-first': () => { transcriptRef.current?.scroll('to-oldest'); },
+    'scroll-to-last': () => { transcriptRef.current?.scroll('to-latest'); },
+    'entrypoint:diffs': () => openDiffs(),
+    // These surfaces existed but answered to no key, so every shortcut that
+    // meant to open one reported itself unwired.
+    'entrypoint:commands': () => setCommandsVisible(true),
+    'entrypoint:session-details': () => setMenuVisible(true),
+    'entrypoint:subagents': () => setSubagentsVisible(true),
+    'model-list': () => setModelVisible(true),
+    'child-session-next': () => setHierarchyVisible(true),
+    'child-session-previous': () => setHierarchyVisible(true),
+    'parent-session': () => setHierarchyVisible(true),
+    // <leader>b toggles the sidebar in the TUI; its todo list lives in this panel.
+    'toggle-sidebar': () => setTodosExpanded((value) => !value),
+  });
 
   const activeHost = ref ? store.connections.find((connection) => connection.id === ref.connectionId) : undefined;
   const hostSessions = ref ? store.sessions[ref.connectionId] ?? [] : [];
@@ -174,24 +230,62 @@ export default function SessionScreen() {
   );
   const rawTranscript = key ? store.messages[key] ?? [] : [];
   const transcript = useMemo(() => sortMessagesChronologically(rawTranscript), [rawTranscript]);
+  const latestTranscriptRef = useRef(transcript);
+  latestTranscriptRef.current = transcript;
+  const getTranscript = useCallback(() => latestTranscriptRef.current, []);
   const renderedTranscript = useMemo(
     () => selectTranscriptWindow(transcript, transcriptWindowSize),
     [transcript, transcriptWindowSize],
   );
   const status = key ? store.sessionStatuses[key] : undefined;
-  const questions = key ? store.questions[key] ?? [] : [];
-  const permissions = key ? store.permissions?.[key] ?? [] : [];
+  const ownQuestions = key ? store.questions[key] ?? [] : [];
+  const ownPermissions = key ? store.permissions?.[key] ?? [] : [];
+  // Subagents raise most permission requests, in child sessions nobody has
+  // open. Their requests belong on this screen, labelled with where they came
+  // from; this session's own requests still decide whether the prompt is locked.
+  const subtree = useMemo(() => {
+    const nodes: Array<{ key: string; title?: string }> = [];
+    const visit = (current: NonNullable<typeof node>, depth: number) => {
+      nodes.push({ key: current.key, title: depth === 0 ? undefined : current.session.title || current.session.id });
+      for (const child of current.children) visit(child, depth + 1);
+    };
+    if (node) visit(node, 0);
+    else if (key) nodes.push({ key });
+    return nodes;
+  }, [key, node]);
+  const permissions = useMemo(
+    () => subtree.flatMap(({ key: entryKey, title }) => (store.permissions?.[entryKey] ?? []).map((request) => ({ request, source: title }))),
+    [store.permissions, subtree],
+  );
+  const questions = useMemo(
+    () => subtree.flatMap(({ key: entryKey, title }) => (store.questions[entryKey] ?? []).map((request) => ({ request, source: title }))),
+    [store.questions, subtree],
+  );
   const permissionError = key ? store.permissionErrors?.[key] : null;
   const loadState = key ? store.sessionLoadStates[key] : undefined;
   const nextMessageCursor = key ? store.messageNextCursors[key] : null;
   const olderMessageLoadState = key ? store.olderMessageLoadStates[key] : undefined;
   const olderMessageError = key ? store.olderMessageErrors[key] : null;
   const sessionError = key ? store.sessionErrors[key] : null;
+  const todos = key ? store.todos[key] : undefined;
+  const failure = key ? store.sessionFailures[key] : null;
   const connectionState = key ? store.eventConnectionStates[key] : undefined;
   const running = isRunningStatus(status);
   const pendingPermissions = useMemo(() => getPendingPermissions(transcript), [transcript]);
-  const promptBlocked = isPromptBlocked(transcript) || permissions.length > 0 || questions.length > 0;
-  const canSend = Boolean(ref && contract && contractFresh && selection?.agentName && selection.model && prompt.trim() && !promptBlocked);
+  // The last turn's error already shows in the transcript when the server
+  // stored it on the message; the session-level box covers the rest.
+  const lastAssistantError = useMemo(() => {
+    const last = [...transcript].reverse().find((message) => message.info.role === 'assistant');
+    return describeTurnError(last?.info.error);
+  }, [transcript]);
+  const visibleFailure = failure && lastAssistantError?.message !== failure.message ? failure : null;
+  const todoMenuDetail = (() => {
+    const board = createTodoBoardModel(todos);
+    return board.total === 0 ? 'The agent has not made a todo list' : `${board.finished}/${board.total} done · ${board.summary}`;
+  })();
+  const retrying = status && 'type' in status && status.type === 'retry' ? status : null;
+  const promptBlocked = isPromptBlocked(transcript) || ownPermissions.length > 0 || ownQuestions.length > 0;
+  const canSend = Boolean(ref && contract && contractFresh && selection?.agentName && selection.model && (prompt.trim() || attachments.length > 0) && !promptBlocked);
   const targetStatuses = useMemo(() => {
     if (!ref) return {};
     return Object.fromEntries(
@@ -239,6 +333,15 @@ export default function SessionScreen() {
     return () => store.unsubscribeFromHost(ref.connectionId);
   }, [key, ref, store.activeSessionKey, store.subscribeToActiveHost, store.unsubscribeFromHost]);
 
+  // The live stream can drop an event without noticing (a phone suspends the
+  // socket, a proxy idles it out). A cheap periodic re-read keeps a pending
+  // gate from going unseen for longer than this.
+  useEffect(() => {
+    if (!ref) return undefined;
+    const timer = setInterval(() => { void store.refreshPendingRequests(ref); }, PENDING_REQUEST_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [ref, store.refreshPendingRequests]);
+
   useEffect(() => {
     setTranscriptAtBottom(true);
     setTranscriptWindowSize(INITIAL_TRANSCRIPT_WINDOW);
@@ -273,6 +376,16 @@ export default function SessionScreen() {
   const reportError = useCallback((error: unknown) => {
     setActionError(error instanceof Error ? error.message : String(error));
   }, []);
+
+  const addAttachments = useCallback(async (source: AttachmentSource) => {
+    try {
+      const picked = await pickAttachments(source, attachments);
+      if (picked.attachments.length > 0) setAttachments((current) => [...current, ...picked.attachments]);
+      setActionError(picked.rejected.length > 0 ? picked.rejected.join('\n') : null);
+    } catch (error) {
+      reportError(error);
+    }
+  }, [attachments, reportError]);
 
   const navigateTo = useCallback((next: SessionRef) => {
     if (ref && routeSessionKey(ref) === routeSessionKey(next)) return;
@@ -369,8 +482,8 @@ export default function SessionScreen() {
             <Text style={styles.backText}>‹</Text>
           </Pressable>
           <Pressable accessibilityRole="button" testID="session-hierarchy-button" style={styles.headerCopy} onPress={() => setHierarchyVisible(true)}>
-            <Text numberOfLines={1} style={styles.title}>{session.title || session.id}</Text>
-            <Text numberOfLines={1} ellipsizeMode="middle" style={styles.subtitle}>
+            <Text selectable numberOfLines={1} style={styles.title}>{session.title || session.id}</Text>
+            <Text selectable numberOfLines={1} ellipsizeMode="middle" style={styles.subtitle}>
               {session.relayTargetName ?? ref.relayTargetID} · {directory ?? 'unknown directory'}
             </Text>
           </Pressable>
@@ -394,12 +507,15 @@ export default function SessionScreen() {
             Machine execution contract {contractState.status} · sending is disabled{contractState.error ? ` · ${contractState.error}` : ''}
           </Text>
         ) : null}
-        {sessionError ? <Text selectable testID="session-load-warning" style={styles.warning}>Transcript refresh warning · {sessionError}</Text> : null}
+        {sessionError ? <Text selectable testID="session-load-warning" style={styles.warning}>{sessionError}</Text> : null}
         {olderMessageLoadState === 'loading' ? <Text testID="session-older-loading" style={styles.notice}>Loading older messages…</Text> : null}
         {olderMessageError ? <Text selectable testID="session-older-error" style={styles.warning}>Older transcript warning · {olderMessageError}</Text> : null}
         {actionError ? <Text selectable testID="session-action-error" style={styles.error}>{actionError}</Text> : null}
 
+        <TodoPanel todos={todos} expanded={todosExpanded} onToggle={() => setTodosExpanded((value) => !value)} />
+
         <View style={styles.transcriptFrame}>
+          <TranscriptContext.Provider value={getTranscript}>
           <VirtualizedTranscript
             ref={transcriptRef}
             transcriptKey={key}
@@ -413,6 +529,18 @@ export default function SessionScreen() {
             onBottomStateChange={setTranscriptAtBottom}
             onOlderEndReached={revealOlderTranscript}
           />
+          </TranscriptContext.Provider>
+          {renderedTranscript.length > 0 ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Scroll to the first message"
+              testID="session-scroll-to-top"
+              style={styles.scrollToTop}
+              onPress={() => transcriptRef.current?.scroll('to-oldest')}>
+              <SymbolView name={{ ios: 'arrow.up', android: 'arrow_upward', web: 'arrow_upward' }} tintColor={palette.text} size={15} />
+              <Text style={styles.scrollToTopText}>Top</Text>
+            </Pressable>
+          ) : null}
           {!transcriptAtBottom ? (
             <Pressable
               accessibilityRole="button"
@@ -429,18 +557,46 @@ export default function SessionScreen() {
         {permissions.length > 0 || questions.length > 0 || permissionError ? (
           <ScrollView testID="session-question-surface" style={styles.questions} contentContainerStyle={styles.questionContent} keyboardShouldPersistTaps="handled">
             {permissionError ? <Text selectable style={styles.error}>{permissionError}</Text> : null}
-            {permissions.map((request) => (
-              <PermissionRequestCard key={request.id} request={request} onReply={handlePermissionReply} />
+            {permissions.map(({ request, source }) => (
+              <View key={request.id}>
+                {source ? <Text selectable testID={`request-source-${request.id}`} style={styles.requestSource}>From subagent · {source}</Text> : null}
+                <PermissionRequestCard request={request} onReply={handlePermissionReply} />
+              </View>
             ))}
-            {questions.map((question) => (
-              <QuestionRequestCard
-                key={question.id}
-                request={question}
-                onReply={(payload) => store.respondToQuestion(ref, payload)}
-                onReject={(requestID) => store.rejectQuestion(ref, requestID)}
-              />
+            {questions.map(({ request: question, source }) => (
+              <View key={question.id}>
+                {source ? <Text selectable testID={`request-source-${question.id}`} style={styles.requestSource}>From subagent · {source}</Text> : null}
+                <QuestionRequestCard
+                  request={question}
+                  onReply={(payload) => store.respondToQuestion(ref, payload)}
+                  onReject={(requestID) => store.rejectQuestion(ref, requestID)}
+                />
+              </View>
             ))}
           </ScrollView>
+        ) : null}
+
+        {retrying ? (
+          <View testID="session-retrying" style={styles.turnNotice}>
+            <TurnErrorBox
+              error={{
+                aborted: false,
+                title: `Retrying${retrying.attempt ? ` · attempt ${retrying.attempt}` : ''}${retrying.next ? ` · next try ${new Date(retrying.next).toLocaleTimeString()}` : ''}`,
+                message: retrying.message || 'The last request failed; the machine is trying again.',
+              }}
+              maxHeight={80}
+            />
+          </View>
+        ) : null}
+        {visibleFailure && key ? (
+          <View style={styles.turnNotice}>
+            <TurnErrorBox
+              testID="session-turn-failure"
+              error={{ aborted: false, title: visibleFailure.title, message: visibleFailure.message }}
+              onDismiss={() => store.dismissSessionFailure(key)}
+              maxHeight={120}
+            />
+          </View>
         ) : null}
 
         <View testID="session-prompt-surface" style={styles.promptDock}>
@@ -451,6 +607,24 @@ export default function SessionScreen() {
                   <Text style={styles.suggestionTitle}>{suggestion.label}</Text>
                   {suggestion.detail ? <Text style={styles.subtitle}>{suggestion.detail}</Text> : null}
                 </Pressable>
+              ))}
+            </ScrollView>
+          ) : null}
+          {attachments.length > 0 ? (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.attachmentRow} testID="session-attachments">
+              {attachments.map((attachment) => (
+                <View key={attachment.id} testID={`session-attachment-${attachment.id}`} style={styles.attachmentChip}>
+                  <Text numberOfLines={1} style={styles.attachmentName}>{attachment.filename}</Text>
+                  <Text style={styles.subtitle}>{formatAttachmentSize(attachment.size)}</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`Remove ${attachment.filename}`}
+                    testID={`session-attachment-remove-${attachment.id}`}
+                    hitSlop={8}
+                    onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}>
+                    <SymbolView name={{ ios: 'xmark.circle.fill', android: 'cancel', web: 'cancel' }} tintColor={palette.textMuted} size={14} />
+                  </Pressable>
+                </View>
               ))}
             </ScrollView>
           ) : null}
@@ -469,10 +643,18 @@ export default function SessionScreen() {
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Attach file reference"
-              testID="session-accessory-attach"
+              accessibilityLabel="Mention an agent, session or file on the machine"
+              testID="session-accessory-reference"
               style={styles.smallButton}
               onPress={() => setPrompt((current) => enterFileReferenceMode(current))}>
+              <SymbolView name={{ ios: 'at', android: 'alternate_email', web: 'alternate_email' }} tintColor={palette.textMuted} size={17} />
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Attach a photo or file"
+              testID="session-accessory-attach"
+              style={styles.smallButton}
+              onPress={() => (Platform.OS === 'web' ? void addAttachments('files') : setAttachVisible(true))}>
               <SymbolView name={{ ios: 'paperclip', android: 'attach_file', web: 'attach_file' }} tintColor={palette.textMuted} size={17} />
             </Pressable>
             <Pressable
@@ -495,13 +677,19 @@ export default function SessionScreen() {
               onPress={async () => {
                 if (!canSend) return;
                 const text = prompt;
+                const sending = attachments;
                 setPrompt('');
+                setAttachments([]);
                 setActionError(null);
-                try {
-                  const sent = await store.sendPrompt(text);
-                  if (!sent) setPrompt((current) => current || text);
-                } catch (error) {
+                const restore = () => {
                   setPrompt((current) => current || text);
+                  setAttachments((current) => (current.length > 0 ? current : sending));
+                };
+                try {
+                  const sent = await store.sendPrompt(text, sending);
+                  if (!sent) restore();
+                } catch (error) {
+                  restore();
                   reportError(error);
                 }
               }}>
@@ -531,6 +719,17 @@ export default function SessionScreen() {
         </View>
 
         <ActionModal
+          title="Attach"
+          visible={attachVisible}
+          onClose={() => setAttachVisible(false)}
+          onActionError={reportError}
+          items={[
+            { id: 'attach-photos', label: 'Photo library', detail: 'Images, sent to the model with your message', onPress: () => addAttachments('photos') },
+            { id: 'attach-files', label: 'Files', detail: 'An image or a PDF from Files', onPress: () => addAttachments('files') },
+          ]}
+        />
+
+        <ActionModal
           title="Session"
           visible={menuVisible}
           onClose={() => setMenuVisible(false)}
@@ -538,6 +737,7 @@ export default function SessionScreen() {
           items={[
             { id: 'hierarchy', label: 'Conversation tree', detail: `${node.children.length} child session${node.children.length === 1 ? '' : 's'}`, onPress: () => setHierarchyVisible(true) },
             { id: 'commands', label: 'Commands', detail: `${contract?.commands.length ?? 0} from this machine`, onPress: () => setCommandsVisible(true) },
+            { id: 'diffs', label: 'Changed files', detail: 'Files this session edited, with the lines added and removed', onPress: () => openDiffs() },
             { id: 'subagents', label: 'Subagents', detail: `${subagents.entries.length} transcript${subagents.entries.length === 1 ? '' : 's'}`, onPress: () => setSubagentsVisible(true) },
             { id: 'rename', label: 'Rename', onPress: () => { setRenameTitle(session.title ?? ''); setRenameVisible(true); } },
             { id: 'share', label: 'Copy share link', onPress: async () => { const url = await store.shareSession(ref); if (url) await Clipboard.setStringAsync(url); } },
@@ -546,8 +746,30 @@ export default function SessionScreen() {
             { id: 'redo', label: 'Redo', disabled: !currentRevertMessageId, onPress: () => redoMessageId ? store.revertMessage(ref, redoMessageId) : store.unrevertSession(ref) },
             { id: 'copy', label: 'Copy transcript', onPress: async () => Clipboard.setStringAsync(store.copySessionTranscript(ref)) },
             { id: 'export', label: 'Export transcript', onPress: async () => Clipboard.setStringAsync(createSessionExportArtifact({ session, messages: transcript })) },
+            { id: 'todos', label: todosExpanded ? 'Hide todo list' : 'Show todo list', detail: todoMenuDetail, disabled: !todos?.length, onPress: () => setTodosExpanded((value) => !value) },
             { id: 'toggle-actions', label: showActions ? 'Hide message actions' : 'Show message actions', onPress: () => setShowActions((value) => !value) },
             { id: 'toggle-time', label: showTimestamps ? 'Hide timestamps' : 'Show timestamps', onPress: () => setShowTimestamps((value) => !value) },
+            { id: 'delete-session', label: 'Delete session', detail: 'Asks again before anything is removed', danger: true, onPress: () => setDeleteVisible(true) },
+          ]}
+        />
+
+        <ActionModal
+          title="Delete session?"
+          visible={deleteVisible}
+          onClose={() => setDeleteVisible(false)}
+          onActionError={reportError}
+          items={[
+            {
+              id: 'delete-confirm',
+              label: 'Delete permanently',
+              detail: `"${session.title ?? session.id}" is removed on ${session.relayTargetName ?? 'the machine that owns it'}, for every device`,
+              danger: true,
+              onPress: async () => {
+                await store.deleteSession(ref);
+                router.replace('/(tabs)/two');
+              },
+            },
+            { id: 'delete-cancel', label: 'Keep this session', onPress: () => undefined },
           ]}
         />
 
@@ -735,17 +957,24 @@ const styles = StyleSheet.create({
   subtitle: { fontSize: 10, lineHeight: 13, color: palette.textMuted },
   transcriptFrame: { flex: 1, position: 'relative' },
   transcript: { flex: 1 },
+  scrollToTop: { position: 'absolute', right: 10, bottom: 52, minHeight: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingHorizontal: 12, borderRadius: 18, borderWidth: 1, borderColor: palette.borderSubtle, backgroundColor: palette.backgroundPanel },
+  scrollToTopText: { fontSize: 12, fontWeight: '800', color: palette.text },
   scrollToLatest: { position: 'absolute', right: 10, bottom: 10, minHeight: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingHorizontal: 12, borderRadius: 18, backgroundColor: palette.primary },
   scrollToLatestText: { fontSize: 12, fontWeight: '800', color: palette.foregroundOnAccent },
   notice: { paddingHorizontal: 9, paddingVertical: 4, fontSize: 10, color: palette.info, backgroundColor: palette.infoBg },
+  turnNotice: { paddingHorizontal: 12, paddingBottom: 6 },
   warning: { paddingHorizontal: 9, paddingVertical: 5, fontSize: 10, color: palette.warning, backgroundColor: palette.warningBg },
   error: { paddingHorizontal: 9, paddingVertical: 5, fontSize: 10, color: palette.error },
   questions: { flexGrow: 0, maxHeight: '40%', backgroundColor: palette.panel },
   questionContent: { gap: 7, padding: 8 },
+  requestSource: { paddingHorizontal: 2, paddingBottom: 3, fontSize: 10, fontWeight: '700', color: palette.warning },
   promptDock: { gap: 3, marginHorizontal: 6, marginBottom: 2, paddingHorizontal: 6, paddingVertical: 4, borderLeftWidth: 2, borderLeftColor: palette.accent, backgroundColor: palette.backgroundElement },
   promptRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 3 },
   promptInput: { flex: 1, minHeight: 34, maxHeight: 84, paddingHorizontal: 3, paddingVertical: 5, fontSize: 13, color: palette.text },
   smallButton: { width: 28, height: 30, alignItems: 'center', justifyContent: 'center' },
+  attachmentRow: { gap: 5, paddingVertical: 2 },
+  attachmentChip: { maxWidth: 200, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 7, paddingVertical: 3, borderRadius: 7, borderWidth: 1, borderColor: palette.borderSubtle, backgroundColor: palette.panel },
+  attachmentName: { flexShrink: 1, fontSize: 11, fontWeight: '700', color: palette.text },
   sendButton: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', borderRadius: 16, backgroundColor: palette.primary },
   disabled: { opacity: 0.4 },
   metadata: { minHeight: 24, alignItems: 'center', gap: 4, paddingRight: 8 },

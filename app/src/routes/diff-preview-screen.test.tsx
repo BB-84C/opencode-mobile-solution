@@ -25,6 +25,20 @@ vi.mock('@/src/components/opencode/ActionModal', () => ({ ActionModal: () => nul
 vi.mock('@/src/components/opencode/TextViewModal', () => ({ TextViewModal: () => null }));
 vi.mock('@/src/ux/clipboard', () => ({ writeClipboardText: vi.fn() }));
 
+const routeMocks = vi.hoisted(() => ({
+  params: {} as Record<string, string | undefined>,
+  diffs: {} as Record<string, unknown[]>,
+}));
+
+vi.mock('expo-router', () => ({ useLocalSearchParams: () => routeMocks.params }));
+
+vi.mock('@/src/store/mobile-store', () => ({
+  sessionStateKey: (ref: { connectionId: string; relayTargetID?: string; sessionId: string }) =>
+    `${ref.connectionId}::${ref.relayTargetID ?? ''}::${ref.sessionId}`,
+  useOpenCodeMobileStore: (selector: (state: unknown) => unknown) =>
+    selector({ diffs: routeMocks.diffs }),
+}));
+
 describe('DiffPreviewScreen layout', () => {
   it('stretches and left-aligns the header so the subtitle cannot be clipped from the leading edge', () => {
     let screen: ReturnType<typeof create> | undefined;
@@ -41,5 +55,38 @@ describe('DiffPreviewScreen layout', () => {
       textAlign: 'left',
     });
     expect(screen!.root.findByProps({ testID: 'diff-preview-title' }).props.style).toMatchObject({ fontSize: 20 });
+  });
+
+  it('shows the session it was opened for, not whichever session is active', () => {
+    routeMocks.params = { connectionId: 'relay', machine: 'mac', session: 'ses_1' };
+    routeMocks.diffs = {
+      'relay::mac::ses_1': [{ path: 'a.ts', hunks: [] }],
+      'relay::mac::ses_other': [{ path: 'b.ts', hunks: [] }, { path: 'c.ts', hunks: [] }],
+    };
+    let screen: ReturnType<typeof create> | undefined;
+    act(() => { screen = create(<DiffPreviewScreen />); });
+
+    const subtitle = screen!.root.findByProps({ testID: 'diff-preview-subtitle' });
+    expect(String(subtitle.props.children)).toContain('1 changed file');
+  });
+
+  it('says a session has no changes rather than falling back to the fixture', () => {
+    routeMocks.params = { connectionId: 'relay', machine: 'mac', session: 'ses_empty' };
+    routeMocks.diffs = {};
+    let screen: ReturnType<typeof create> | undefined;
+    act(() => { screen = create(<DiffPreviewScreen />); });
+
+    const subtitle = screen!.root.findByProps({ testID: 'diff-preview-subtitle' });
+    expect(String(subtitle.props.children)).toContain('No file changes recorded');
+  });
+
+  it('keeps the local fixture when opened without a session, for copy QA', () => {
+    routeMocks.params = {};
+    routeMocks.diffs = {};
+    let screen: ReturnType<typeof create> | undefined;
+    act(() => { screen = create(<DiffPreviewScreen />); });
+
+    const subtitle = screen!.root.findByProps({ testID: 'diff-preview-subtitle' });
+    expect(String(subtitle.props.children)).toContain('Local fixture');
   });
 });

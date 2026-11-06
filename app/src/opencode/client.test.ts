@@ -725,6 +725,37 @@ describe('OpenCodeClient', () => {
     expect(signal?.aborted).toBe(true);
   });
 
+  it('subscribes to the machine-wide stream and unwraps each event with its directory', async () => {
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce({
+        done: false,
+        value: new TextEncoder().encode(
+          'data: {"payload":{"type":"server.connected","properties":{}}}\n\n'
+          + 'data: {"directory":"/repo","payload":{"type":"permission.asked","properties":{"id":"per_1","sessionID":"child"}}}\n\n',
+        ),
+      })
+      .mockImplementationOnce(() => new Promise(() => undefined));
+    const fetchMock = vi.fn().mockResolvedValueOnce(streamResponse(read));
+    const client = new OpenCodeClient(bearerConnection, { fetch: fetchMock });
+    const events: unknown[] = [];
+    const states: string[] = [];
+
+    const unsubscribe = client.subscribeEvents((event) => events.push(event), {
+      scope: 'global',
+      onConnectionState: (state) => states.push(state),
+    });
+    await eventually(() => {
+      expect(events).toEqual([
+        { type: 'server.connected', properties: {} },
+        { type: 'permission.asked', properties: { id: 'per_1', sessionID: 'child' }, directory: '/repo' },
+      ]);
+      expect(states).toContain('live');
+    });
+    unsubscribe();
+    expect(fetchMock.mock.calls[0][0]).toBe('https://opencode.example.com/global/event');
+  });
+
   it('reconnects an ended SSE stream and invokes the refetch boundary only after the new stream connects', async () => {
     const firstRead = vi
       .fn()
@@ -787,6 +818,55 @@ describe('OpenCodeClient', () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('OpenCodeClient.createSession', () => {
+  const serverPlaceholder = /^New session - \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+  function createdSession() {
+    return { id: 'ses_new', title: 'New session - 2026-09-24T07:30:15.250Z', directory: '/repo' };
+  }
+
+  function bodyOf(fetchMock: ReturnType<typeof vi.fn>) {
+    const init = fetchMock.mock.calls[0]?.[1] as { body?: string } | undefined;
+    return JSON.parse(init?.body ?? '{}') as Record<string, unknown>;
+  }
+
+  it('omits the title so the server can auto-name the session', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(createdSession()));
+    const client = new OpenCodeClient(bearerConnection, { fetch: fetchMock });
+
+    await client.createSession(undefined, '/repo');
+
+    expect(bodyOf(fetchMock)).toEqual({});
+  });
+
+  it('keeps a title the caller chose', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(createdSession()));
+    const client = new OpenCodeClient(bearerConnection, { fetch: fetchMock });
+
+    await client.createSession('Quarterly review', '/repo');
+
+    expect(bodyOf(fetchMock)).toEqual({ title: 'Quarterly review' });
+  });
+
+  it('leaves the server placeholder in place, so the server can still rename it', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(createdSession()));
+    const client = new OpenCodeClient(bearerConnection, { fetch: fetchMock });
+
+    const session = await client.createSession(undefined, '/repo');
+
+    expect('title' in bodyOf(fetchMock)).toBe(false);
+    expect(session.title).toMatch(serverPlaceholder);
+  });
+
+  it('still refuses to create a session without a directory', () => {
+    const fetchMock = vi.fn();
+    const client = new OpenCodeClient(bearerConnection, { fetch: fetchMock });
+
+    expect(() => client.createSession()).toThrow('requires a directory');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

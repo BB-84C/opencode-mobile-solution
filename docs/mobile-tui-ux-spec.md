@@ -116,14 +116,14 @@ This file freezes the mobile UX direction so implementation does not drift as pa
    - TUI `esc` interrupt maps to the armed double-tap interrupt control.
 
 5. User message operations.
-   - Tap or long press on user messages opens actions: `Fork from here`, `Revert to here` / `Undo`, `Copy`, `Jump` / `Timeline`.
+   - The permanent `...` button on every message opens actions: `Fork from here`, `Revert to here` / `Undo`, `Copy`, `Jump` / `Timeline`, `Select text`. Long press is left to text selection.
    - If API or metadata support is missing, keep the entry visible but disabled with a concrete reason.
 
 6. Text selection and copy.
    - Assistant text, tool result, bash output, diff raw text, reasoning, error, and user message text must be copyable.
-   - Plain text uses selectable text where React Native supports it.
-   - Complex tool and diff cards must expose `Copy`, `Copy raw`, and `Open text view`.
-   - If nested selectable text is unstable on a platform, `Open text view` is the required fallback so anything can still be copied.
+   - Any part of the text must be selectable, not only whole paragraphs. On iOS a React Native `Text` only copies its whole string, so each message renders as one UITextView (`SelectableMarkdown` / `SelectableText`), and a selection can run across its paragraphs, lists and code blocks. The desktop and web build use ordinary DOM text, where a drag can cross messages.
+   - Complex tool and diff cards must expose `Copy`, `Copy raw`, and `Select text`.
+   - A message's `Select text` opens the whole loaded conversation as one text, scrolled to that message, so a phone can select across messages too.
 
 ## Official TUI Visual Contract
 
@@ -140,4 +140,4 @@ This file freezes the mobile UX direction so implementation does not drift as pa
 - Any UX change that contradicts this file requires explicit user approval before implementation.
 - TDD should include unit tests for mappings that can be expressed without a simulator: command entries, subagent navigation intent, user-message actions, copy fallbacks, thinking cycling, and interrupt arming.
 - End-to-end testing against the real VPS must cover at least host connection, health check, session loading, prompt dispatch, transcript refresh, and one command/overflow surface.
-- The original product spec in `docs/opencode-mobile-spec.md` remains useful for API and architecture, but this file wins for UX hierarchy and TUI behavior.
+- The original product spec in `docs/mobile-spec.md` remains useful for API and architecture, but this file wins for UX hierarchy and TUI behavior.

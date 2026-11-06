@@ -259,6 +259,8 @@ export interface MessageInfo {
     created?: number;
     completed?: number;
   };
+  /** Set by the server when the turn failed: `{ name, data: { message, statusCode? } }`. */
+  error?: unknown;
 }
 
 export interface MessageWithParts {

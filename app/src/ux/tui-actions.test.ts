@@ -118,10 +118,10 @@ describe('TUI-aligned mobile UX actions', () => {
     });
   });
 
-  it('exposes fork, revert, timeline jump, and copy on user messages', () => {
+  it('exposes fork, revert, timeline jump, copy and select text on user messages', () => {
     const actions = getMessageActions({ role: 'user', messageId: 'm1', canFork: true, canRevert: true, canTimeline: true });
 
-    expect(actions.map((action) => action.id)).toEqual(['fork', 'revert', 'timeline', 'copy']);
+    expect(actions.map((action) => action.id)).toEqual(['fork', 'revert', 'timeline', 'copy', 'open-text-view']);
     expect(actions.find((action) => action.id === 'fork')).toMatchObject({ disabled: false });
     expect(actions.find((action) => action.id === 'revert')).toMatchObject({ disabled: false });
     expect(actions.find((action) => action.id === 'timeline')).toMatchObject({ disabled: false });

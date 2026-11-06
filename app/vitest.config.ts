@@ -12,6 +12,9 @@ export default defineConfig({
       'react-native-markdown-display': fileURLToPath(
         new URL('./src/test/react-native-markdown-display.tsx', import.meta.url),
       ),
+      '@bsky.app/react-native-uitextview': fileURLToPath(
+        new URL('./src/test/react-native-uitextview.tsx', import.meta.url),
+      ),
       '@': fileURLToPath(new URL('.', import.meta.url)),
     },
   },

@@ -153,6 +153,7 @@ export function getMessageActions(input: {
         detail: input.canTimeline ? undefined : 'Timeline UI is not wired yet',
       },
       { id: 'copy', label: 'Copy', disabled: false },
+      { id: 'open-text-view', label: 'Select text', disabled: false },
     ];
   }
 
@@ -160,13 +161,13 @@ export function getMessageActions(input: {
     return [
       { id: 'copy', label: 'Copy visible text' },
       { id: 'copy-raw', label: 'Copy raw output' },
-      { id: 'open-text-view', label: 'Open text view' },
+      { id: 'open-text-view', label: 'Select text' },
     ];
   }
 
   return [
     { id: 'copy', label: 'Copy' },
-    { id: 'open-text-view', label: 'Open text view' },
+    { id: 'open-text-view', label: 'Select text' },
   ];
 }
 

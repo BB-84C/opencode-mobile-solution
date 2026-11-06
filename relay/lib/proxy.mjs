@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { EXPOSED_RESPONSE_HEADERS } from './cors.mjs';
 
 export const ORDINARY_REQUEST_TIMEOUT_MS = 300_000;
 
@@ -44,7 +45,25 @@ export function proxyRequest({ clientReq, clientRes, target, scope, onOpen, onCl
       proxyRes.destroy();
       return;
     }
-    clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
+    // The relay answers its own OPTIONS preflight, but the upstream response is
+    // forwarded verbatim. A client with a real origin -- the desktop shell loads
+    // from its own scheme -- would pass the preflight and then be blocked from
+    // reading the body. Supply the header only when the backend did not, so a
+    // backend started with `opencode serve --cors` keeps its own policy.
+    const responseHeaders = { ...proxyRes.headers };
+    const declaresOrigin = Object.keys(responseHeaders)
+      .some((name) => name.toLowerCase() === 'access-control-allow-origin');
+    if (!declaresOrigin) responseHeaders['access-control-allow-origin'] = '*';
+    // Passing the preflight only buys the request. A cross-origin reader still
+    // sees null for every custom response header unless it is exposed by name,
+    // which turned the paged session list into a silent single page.
+    const declaresExposed = Object.keys(responseHeaders)
+      .some((name) => name.toLowerCase() === 'access-control-expose-headers');
+    if (!declaresExposed) {
+      responseHeaders['access-control-expose-headers'] = EXPOSED_RESPONSE_HEADERS.join(',');
+    }
+
+    clientRes.writeHead(proxyRes.statusCode, responseHeaders);
     proxyRes.pipe(clientRes);
     proxyRes.once('end', notifyClose);
   });

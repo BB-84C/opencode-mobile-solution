@@ -3,13 +3,13 @@
 > Delegate to: Codex (OpenAI Codex native iOS app development)  
 > Reference UX: ChatGPT mobile app's Codex integration
 
-> UX alignment override: follow `docs/opencode-mobile-tui-ux-spec.md` for the approved OpenCode TUI interaction model. That file is the source of truth whenever this older product spec describes a project-list-first or generic-chat UX.
+> UX alignment override: follow `docs/mobile-tui-ux-spec.md` for the approved OpenCode TUI interaction model. That file is the source of truth whenever this older product spec describes a project-list-first or generic-chat UX.
 
 ## Normative Reading Order
 
 For implementation and review, use these sources in order:
 
-1. `docs/opencode-mobile-tui-ux-spec.md` for interaction and visual behavior.
+1. `docs/mobile-tui-ux-spec.md` for interaction and visual behavior.
 2. Section 13 of this file for the verified transport contract.
 3. `docs/codex-e2e-connection.md` for the live endpoint and operational test rules.
 4. `docs/opencode-mobile-e2e-coverage.md` for evidence status and remaining gaps.
@@ -69,9 +69,9 @@ A mobile companion app for OpenCode that turns your phone into a remote control 
                           │ HTTPS
                           ▼
 ┌──────────────────────────────────────────────────────────┐
-│              User's VPS / Relay                          │
-│  Caddy → Token Relay (4097) → frp Tunnel → Local OC     │
-│  (or: Caddy → frp Tunnel → Local OC with Basic Auth)     │
+│              Host (always on), reached over Tailscale    │
+│  tailscale serve :8443 → Token Relay (4097) → Local OC   │
+│  (this fork; upstream used Caddy + an frp tunnel)        │
 └──────────────────────────────────────────────────────────┘
 ```
 

@@ -56,7 +56,16 @@ export function proxyRequest({ clientReq, clientRes, target, scope, onOpen, onCl
     notifyClose();
   };
   onOpen?.({ clientID: scope.clientID, clientToken: scope.clientToken, targetID: scope.targetID, streaming, close });
-  clientRes.once('close', notifyClose);
+  clientRes.once('close', () => {
+    // A client that disappears mid-response must take its upstream request with
+    // it. Phones drop SSE streams constantly (screen lock, network switch, app
+    // backgrounded), and without this the relay keeps one upstream connection
+    // per abandoned stream until the backend stops accepting new ones and every
+    // /event starts answering 502. Only notify on a response that already
+    // finished on its own; there is nothing left to tear down in that case.
+    if (!clientRes.writableEnded) close();
+    else notifyClose();
+  });
   proxyReq.once('error', (error) => {
     if (closed || timedOut) return;
     notifyClose();

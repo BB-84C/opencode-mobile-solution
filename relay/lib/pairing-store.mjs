@@ -398,7 +398,12 @@ export class PairingStore {
     const dynamicTargets = Array.isArray(availableTargetIDs)
       ? [...new Set(availableTargetIDs.filter((targetID) => typeof targetID === 'string' && targetID))]
       : null;
-    const targetIDs = dynamicTargets ?? [...device.targetIDs];
+    // A paired device may never gain access to a target its pairing scope did not
+    // grant. Intersect with the device's own grant instead of replacing it, so a
+    // target that appears on the relay later cannot silently widen this device.
+    const targetIDs = dynamicTargets
+      ? device.targetIDs.filter((targetID) => dynamicTargets.includes(targetID))
+      : [...device.targetIDs];
     const targetID = targetIDs.includes(device.targetID) ? device.targetID : targetIDs[0];
     return {
       clientID: device.clientID,

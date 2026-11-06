@@ -11,7 +11,11 @@ export async function createFakeUpstream({ username = 'opencode', password = 'ba
     const url = new URL(request.url, 'http://fake-upstream'); const pathname = url.pathname;
     if (pathname === '/global/health') return response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'ok' }));
     if (pathname === '/config') return response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(config));
-    if (pathname === '/global/event' || pathname === '/event') { response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' }); const client = { response }; eventClients.add(client); request.on('close', () => eventClients.delete(client)); writeSse(response, { event: 'server.connected', data: '{}' }); return; }
+    // NOTE: the handler above already drained `request` with `for await`, so the
+    // request stream has ended and a `request.on('close')` registered here never
+    // fires again — the set would only ever grow. Track teardown on `response`,
+    // which stays open for the life of the stream.
+    if (pathname === '/global/event' || pathname === '/event') { response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' }); const client = { response }; eventClients.add(client); response.on('close', () => eventClients.delete(client)); writeSse(response, { event: 'server.connected', data: '{}' }); return; }
     if (pathname === '/__test/status/502' || pathname === '/__test/status/504') { const statusCode = Number(pathname.slice(-3)); return response.writeHead(statusCode, { 'content-type': 'application/json', 'x-upstream-status': String(statusCode) }).end(JSON.stringify({ statusCode })); }
     if (pathname === '/__test/chunked') { response.writeHead(206, { 'content-type': 'application/octet-stream', 'x-upstream-mode': 'chunked' }); response.write(Buffer.from([0, 1, 2])); return setImmediate(() => response.end(Buffer.from([253, 254, 255]))); }
     response.writeHead(200, { 'content-type': 'application/octet-stream', 'x-fake-upstream': 'transparent' }); response.end(body);
@@ -20,6 +24,9 @@ export async function createFakeUpstream({ username = 'opencode', password = 'ba
   const publishEvent = ({ id = 'evt_live', event = 'message.updated', data = '{}' } = {}) => { for (const client of eventClients) writeSse(client.response, { id, event, data: typeof data === 'string' ? data : JSON.stringify(data) }); };
   return { server, url: `http://127.0.0.1:${server.address().port}`, requests,
     publishEvent,
+    // Number of SSE streams the upstream still believes are open. Lets a test
+    // prove the relay tears down its upstream request when a client vanishes.
+    activeEventClients: () => eventClients.size,
     disconnectEvents() { for (const client of eventClients) client.response.end(); eventClients.clear(); },
   };
 }

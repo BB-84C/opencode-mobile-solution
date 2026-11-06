@@ -2,7 +2,7 @@
   "expo": {
     "name": "opencode-mobile",
     "slug": "opencode-mobile",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "opencode",
@@ -48,6 +48,14 @@
         }
       ],
       "expo-secure-store",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow OpenCode to attach photos you choose to a message.",
+          "cameraPermission": "Allow OpenCode to scan relay pairing QR codes.",
+          "microphonePermission": false
+        }
+      ],
       [
         "expo-camera",
         {

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MessageWithParts } from '@/src/opencode/types';
 
 import { MessageCard } from './MessageCard';
+import { TranscriptContext } from './transcript-context';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -18,6 +19,7 @@ vi.mock('react-native', async () => {
       React.createElement(name, { ...props, ref } as any, children as any),
     );
   return {
+    Platform: { OS: 'ios', select: (options: any) => options.ios ?? options.default },
     Pressable: host('Pressable'),
     StyleSheet: {
       create: <T extends Record<string, unknown>>(styles: T) => styles,
@@ -78,7 +80,7 @@ describe('MessageCard rendering boundary', () => {
     expect(mocks.markdownRenders).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      screen!.root.findByProps({ testID: 'message-card-message-1' }).props.onPress();
+      screen!.root.findByProps({ testID: 'message-actions-message-1' }).props.onPress();
     });
     const actionModal = screen!.root.findByType('ActionModal' as any);
     const timeline = actionModal.props.items.find((item: { id: string }) => item.id === 'timeline');
@@ -87,6 +89,70 @@ describe('MessageCard rendering boundary', () => {
     });
     expect(firstTimeline).not.toHaveBeenCalled();
     expect(latestTimeline).toHaveBeenCalledWith('message-1');
+  });
+
+  it('opens Select text on the whole conversation, scrolled to this message', async () => {
+    const reply = {
+      info: { id: 'message-2', sessionID: 'session-1', role: 'assistant' },
+      parts: [{ id: 'part-2', messageID: 'message-2', sessionID: 'session-1', type: 'text', text: 'world' }],
+    } as MessageWithParts;
+    const transcript = [message, reply];
+    let screen: ReactTestRenderer | undefined;
+    await act(async () => {
+      screen = create(
+        <TranscriptContext.Provider value={() => transcript}>
+          <MessageCard message={reply} />
+        </TranscriptContext.Provider>,
+      );
+    });
+    await act(async () => {
+      screen!.root.findByProps({ testID: 'message-actions-message-2' }).props.onPress();
+    });
+    const actionModal = screen!.root.findByType('ActionModal' as any);
+    const selectText = actionModal.props.items.find((item: { id: string }) => item.id === 'open-text-view');
+    await act(async () => selectText.onPress());
+    const sheet = screen!.root.findByType('TextViewModal' as any);
+    expect(sheet.props.visible).toBe(true);
+    expect(sheet.props.title).toBe('Conversation');
+    expect(sheet.props.text).toBe('── You ──\nhello\n\n── Assistant ──\nworld');
+    expect(sheet.props.text.slice(sheet.props.focusOffset)).toBe('── Assistant ──\nworld');
+  });
+
+  it('shows a failed turn in a red box, and an abort only as an interruption', async () => {
+    const failed = {
+      info: { id: 'm-err', sessionID: 'session-1', role: 'assistant', error: { name: 'APIError', data: { message: 'No available Claude accounts', statusCode: 500 } } },
+      parts: [],
+    } as unknown as MessageWithParts;
+    let screen: ReactTestRenderer | undefined;
+    await act(async () => { screen = create(<MessageCard message={failed} />); });
+    expect(screen!.root.findAll((node) => node.props.testID === 'message-turn-error-m-err' && node.props.accessibilityRole === 'alert').length).toBeGreaterThan(0);
+    const texts = screen!.root.findAllByType('Text' as any).map((node) => String(node.props.children));
+    expect(texts).toContain('API error · 500');
+    expect(texts).toContain('No available Claude accounts');
+
+    const aborted = { ...failed, info: { ...failed.info, id: 'm-abort', error: { name: 'MessageAbortedError', data: { message: 'Aborted' } } } } as unknown as MessageWithParts;
+    await act(async () => { screen!.update(<MessageCard message={aborted} />); });
+    const texts2 = screen!.root.findAllByType('Text' as any).map((node) => String(node.props.children));
+    expect(texts2).toContain('Interrupted');
+    expect(texts2).not.toContain('No available Claude accounts');
+  });
+
+  it('labels an attached file by name, without printing its bytes', async () => {
+    const withFile = {
+      info: { id: 'message-2', sessionID: 'session-1', role: 'user' },
+      parts: [
+        { id: 'part-1', messageID: 'message-2', sessionID: 'session-1', type: 'text', text: 'look' },
+        { id: 'part-2', messageID: 'message-2', sessionID: 'session-1', type: 'file', mime: 'image/jpeg', filename: 'shot.jpg', url: 'data:image/jpeg;base64,SECRETBYTES' },
+      ],
+    } as MessageWithParts;
+    let screen: ReactTestRenderer | undefined;
+    await act(async () => {
+      screen = create(<MessageCard message={withFile} />);
+    });
+
+    const label = screen!.root.findByProps({ testID: 'message-file-message-2-1' });
+    expect(JSON.stringify(label.props.children)).toContain('shot.jpg');
+    expect(JSON.stringify(screen!.toJSON())).not.toContain('SECRETBYTES');
   });
 
   it('rebuilds the card when the immutable message value changes', async () => {

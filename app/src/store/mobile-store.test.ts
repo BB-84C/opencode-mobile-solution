@@ -916,34 +916,201 @@ describe('mobile store composite relay contract', () => {
     expect(failureCalls).toHaveLength(1);
   });
 
-  it('never creates a session when no existing session is active', async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-    const { useOpenCodeMobileStore } = await import('./mobile-store');
-    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id, activeSessionRef: null });
+  describe('attachments', () => {
+    const image = { id: 'a1', filename: 'shot.jpg', mime: 'image/jpeg', size: 3, dataUrl: 'data:image/jpeg;base64,AAAA' };
+    const pdf = { id: 'p1', filename: 'paper.pdf', mime: 'application/pdf', size: 3, dataUrl: 'data:application/pdf;base64,AAAA' };
 
-    await expect(useOpenCodeMobileStore.getState().sendPrompt('Do not create')).resolves.toBeNull();
-    useOpenCodeMobileStore.getState().startNewSessionPrompt();
+    async function storeWithModel(capabilities?: Record<string, unknown>, promptMode: 'ask' | 'shell' = 'ask') {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('/session/session-1/prompt_async?')) return emptyResponse();
+        if (url.includes('/session/session-1/message?')) return jsonResponse([]);
+        if (url.includes('/question?')) return jsonResponse([]);
+        throw new Error(`unexpected request ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const { executionScopeKey, sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+      const ref = { connectionId: host.id, relayTargetID: 'mac', sessionId: 'session-1' };
+      const key = sessionStateKey(ref);
+      const scope = executionScopeKey(ref, '/repo');
+      const contract = testMachineContract(ref, '/repo');
+      if (capabilities) contract.providers![0].models['gpt-5.5'].capabilities = capabilities;
+      useOpenCodeMobileStore.setState({
+        connections: [host],
+        activeConnectionId: host.id,
+        activeSessionRef: ref,
+        activeSessionKey: key,
+        activeSessionId: ref.sessionId,
+        promptMode,
+        sessions: { [host.id]: [{ id: ref.sessionId, relayTargetID: 'mac', directory: '/repo' }] },
+        sessionSelections: { [key]: { agentName: 'build', model: { providerID: 'openai', modelID: 'gpt-5.5' } } },
+        machineContracts: { [scope]: contract },
+        contractLoadStates: { [scope]: { status: 'fresh', attemptedAt: contract.fetchedAt, verifiedAt: contract.fetchedAt, error: null } },
+      });
+      const dispatched = () => fetchMock.mock.calls
+        .filter(([input]) => String(input).includes('/prompt_async?'))
+        .map(([, init]) => JSON.parse(String(init?.body)) as { parts: unknown[] });
+      return { store: useOpenCodeMobileStore, key, dispatched };
+    }
 
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(useOpenCodeMobileStore.getState().error).toContain('does not create sessions');
+    it('sends each attachment as a file part after the text', async () => {
+      const { store, dispatched } = await storeWithModel({ attachment: true, input: { image: true, pdf: true } });
+
+      await expect(store.getState().sendPrompt('What is in these?', [image, pdf])).resolves.toBe('session-1');
+
+      expect(dispatched()).toHaveLength(1);
+      expect(dispatched()[0].parts).toEqual([
+        { type: 'text', text: 'What is in these?' },
+        { type: 'file', mime: 'image/jpeg', filename: 'shot.jpg', url: 'data:image/jpeg;base64,AAAA' },
+        { type: 'file', mime: 'application/pdf', filename: 'paper.pdf', url: 'data:application/pdf;base64,AAAA' },
+      ]);
+    });
+
+    it('sends an attachment with no text at all', async () => {
+      const { store, dispatched } = await storeWithModel();
+
+      await expect(store.getState().sendPrompt('   ', [image])).resolves.toBe('session-1');
+
+      expect(dispatched()[0].parts).toEqual([
+        { type: 'file', mime: 'image/jpeg', filename: 'shot.jpg', url: 'data:image/jpeg;base64,AAAA' },
+      ]);
+      expect(store.getState().promptHistory).not.toContain('');
+    });
+
+    it('refuses before sending when the model says it cannot read the attachment', async () => {
+      const { store, key, dispatched } = await storeWithModel({ attachment: true, input: { image: true, pdf: false } });
+
+      await expect(store.getState().sendPrompt('Summarise', [pdf])).resolves.toBeNull();
+
+      expect(dispatched()).toHaveLength(0);
+      expect(store.getState().sessionErrors[key]).toMatch(/GPT-5\.5.*PDF/);
+    });
+
+    it('refuses attachments on a slash command or a shell line instead of dropping them', async () => {
+      const slash = await storeWithModel();
+      await expect(slash.store.getState().sendPrompt('/review', [image])).resolves.toBeNull();
+      expect(slash.dispatched()).toHaveLength(0);
+      expect(slash.store.getState().sessionErrors[slash.key]).toMatch(/attachment/i);
+
+      const shell = await storeWithModel(undefined, 'shell');
+      await expect(shell.store.getState().sendPrompt('!ls', [image])).resolves.toBeNull();
+      expect(shell.dispatched()).toHaveLength(0);
+    });
   });
 
-  it('does not expose fork as a backdoor session-creation operation', async () => {
-    const fetchMock = vi.fn();
+  it('learns a machine\'s agents and models without a session existing there', async () => {
+    // A fresh install has no session anywhere, so the contract cache is empty and
+    // the new-session form would have nothing to offer.
+    const respond = (url: string) => {
+      if (url.includes('/agent')) return [{ name: 'build' }, { name: 'plan' }];
+      if (url.includes('/config/providers')) {
+        return {
+          providers: [{
+            id: 'anthropic',
+            name: 'Anthropic',
+            models: { 'claude-opus-5': { id: 'claude-opus-5', providerID: 'anthropic', name: 'Claude Opus 5' } },
+          }],
+          default: { anthropic: 'claude-opus-5' },
+        };
+      }
+      if (url.includes('/command')) return [];
+      return {};
+    };
+    const fetchMock = vi.fn(async (input: unknown) => new Response(JSON.stringify(respond(String(input))), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { useOpenCodeMobileStore, executionScopeKey } = await import('./mobile-store');
+    useOpenCodeMobileStore.setState({ connections: [host], machineContracts: {} });
+
+    const loaded = await useOpenCodeMobileStore.getState().loadMachineContract({
+      connectionId: host.id,
+      relayTargetID: 'mac',
+      directory: '/repo',
+    });
+
+    expect(loaded).toBe(true);
+    const key = executionScopeKey({ connectionId: host.id, relayTargetID: 'mac' }, '/repo');
+    const contract = useOpenCodeMobileStore.getState().machineContracts[key];
+    expect(contract?.agents.map((agent) => agent.name)).toContain('build');
+    expect(contract?.providers.length).toBeGreaterThan(0);
+  });
+
+  it('reports failure rather than caching a contract a machine could not supply', async () => {
+    const fetchMock = vi.fn(async () => new Response('nope', { status: 500 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { useOpenCodeMobileStore } = await import('./mobile-store');
+    useOpenCodeMobileStore.setState({ connections: [host], machineContracts: {} });
+
+    const loaded = await useOpenCodeMobileStore.getState().loadMachineContract({
+      connectionId: host.id,
+      relayTargetID: 'mac',
+    });
+
+    expect(loaded).toBe(false);
+    expect(useOpenCodeMobileStore.getState().machineContracts).toEqual({});
+  });
+
+  it('creates a session on the chosen machine and puts it at the top of the list', async () => {
+    const created = { id: 'ses_new', title: 'New Session', directory: '/repo', time: { created: 2, updated: 2 } };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(created), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { useOpenCodeMobileStore } = await import('./mobile-store');
+    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id, sessions: {} });
+
+    const ref = await useOpenCodeMobileStore.getState().createSession({
+      connectionId: host.id,
+      relayTargetID: 'mac',
+      directory: '/repo',
+      title: 'New Session',
+    });
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect(ref).toMatchObject({ connectionId: host.id, relayTargetID: 'mac', sessionId: 'ses_new' });
+    const stored = useOpenCodeMobileStore.getState().sessions[host.id] ?? [];
+    expect(stored.map((session) => session.id)).toContain('ses_new');
+    // The session has to carry the machine it was created on, or later requests
+    // would be routed to whichever backend answers first.
+    expect(stored.find((session) => session.id === 'ses_new')?.relayTargetID).toBe('mac');
+  });
+
+  it('reports a refused creation instead of returning a ref to nothing', async () => {
+    const fetchMock = vi.fn(async () => new Response('no', { status: 500 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { useOpenCodeMobileStore } = await import('./mobile-store');
+    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id, sessions: {} });
+
+    const ref = await useOpenCodeMobileStore.getState().createSession({ connectionId: host.id, relayTargetID: 'mac' });
+
+    expect(ref).toBeNull();
+    expect(useOpenCodeMobileStore.getState().error).toBeTruthy();
+    expect(useOpenCodeMobileStore.getState().sessions[host.id] ?? []).toEqual([]);
+  });
+
+  it('forks a session and keeps the fork on the machine it came from', async () => {
+    const forked = { id: 'ses_fork', title: 'Fork', directory: '/repo', time: { created: 3, updated: 3 } };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(forked), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
     vi.stubGlobal('fetch', fetchMock);
     const { useOpenCodeMobileStore } = await import('./mobile-store');
     const ref = { connectionId: host.id, relayTargetID: 'mac', sessionId: 'session-1' };
     useOpenCodeMobileStore.setState({
       connections: [host],
       activeConnectionId: host.id,
-      sessions: { [host.id]: [{ id: ref.sessionId, relayTargetID: 'mac', directory: '/repo' }] },
+      sessions: { [host.id]: [{ id: ref.sessionId, relayTargetID: 'mac', directory: '/repo' } as Session] },
     });
 
-    await expect(useOpenCodeMobileStore.getState().forkSession(ref, 'message-1')).resolves.toBeNull();
+    await expect(useOpenCodeMobileStore.getState().forkSession(ref, 'message-1')).resolves.toBe('ses_fork');
 
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(useOpenCodeMobileStore.getState().error).toContain('does not create or fork sessions');
+    expect(fetchMock).toHaveBeenCalled();
+    const stored = useOpenCodeMobileStore.getState().sessions[host.id] ?? [];
+    expect(stored.find((session) => session.id === 'ses_fork')?.relayTargetID).toBe('mac');
   });
 
   it('keeps existing-session controls routed to the selected relay target', async () => {
@@ -1096,6 +1263,117 @@ describe('mobile store composite relay contract', () => {
     sync.resolve();
     await reconciliation;
     useOpenCodeMobileStore.getState().unsubscribeFromHost(host.id);
+  });
+
+  it('keeps a subagent\'s pending permission when it re-reads the directory for the parent', async () => {
+    const { OpenCodeClient } = await import('@/src/opencode/client');
+    const childRequest = { id: 'per_child', sessionID: 'child', permission: 'bash', patterns: ['npm test'], metadata: {}, always: [] };
+    vi.spyOn(OpenCodeClient.prototype, 'listPermissions').mockResolvedValue([childRequest]);
+    vi.spyOn(OpenCodeClient.prototype, 'listQuestions').mockResolvedValue([]);
+    const { sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+    const parent = { connectionId: host.id, relayTargetID: 'mac', sessionId: 'root' };
+    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id,
+      sessions: { [host.id]: [
+        { id: 'root', relayTargetID: 'mac', directory: '/repo' },
+        { id: 'child', parentID: 'root', relayTargetID: 'mac', directory: '/repo' },
+      ] },
+      permissions: { [sessionStateKey({ ...parent, sessionId: 'child' })]: [{ ...childRequest, id: 'per_stale' }] },
+    });
+
+    await useOpenCodeMobileStore.getState().refreshPendingRequests(parent);
+
+    const { permissions } = useOpenCodeMobileStore.getState();
+    expect(permissions[sessionStateKey({ ...parent, sessionId: 'child' })]).toEqual([childRequest]);
+    expect(permissions[sessionStateKey(parent)]).toEqual([]);
+  });
+
+  it('follows every directory on the machine with nothing open, and reads what was already pending', async () => {
+    const { OpenCodeClient } = await import('@/src/opencode/client');
+    const handlers: Array<{ handler: (event: any) => void; options?: EventSubscriptionOptions }> = [];
+    vi.spyOn(OpenCodeClient.prototype, 'subscribeEvents').mockImplementation((handler, options) => {
+      handlers.push({ handler, options });
+      return () => undefined;
+    });
+    const pending = { id: 'que_old', sessionID: 'root', questions: [{ header: 'Go', question: 'Proceed?', options: [] }] };
+    const listQuestions = vi.spyOn(OpenCodeClient.prototype, 'listQuestions').mockResolvedValue([pending]);
+    vi.spyOn(OpenCodeClient.prototype, 'listPermissions').mockResolvedValue([]);
+    const { sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+    const scope = { connectionId: host.id, relayTargetID: 'mac' };
+    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id, activeSessionRef: null,
+      relayTargets: { [host.id]: [{ id: 'mac', name: 'Mac', reachable: true, lastChecked: null }] },
+      sessions: { [host.id]: [
+        { id: 'root', relayTargetID: 'mac', directory: '/repo' },
+        { id: 'child', parentID: 'root', relayTargetID: 'mac', directory: '/repo' },
+      ] },
+    });
+
+    useOpenCodeMobileStore.getState().startAttentionWatch();
+    expect(handlers).toHaveLength(1);
+    expect(handlers[0].options?.scope).toBe('global');
+
+    handlers[0].options?.onConnectionState?.('live');
+    await eventually(() => expect(useOpenCodeMobileStore.getState().questions[sessionStateKey({ ...scope, sessionId: 'root' })]).toEqual([pending]));
+    expect(listQuestions).toHaveBeenCalledWith(expect.objectContaining({ directory: '/repo' }));
+
+    handlers[0].handler({ type: 'permission.asked', directory: '/repo', properties: { id: 'per_live', sessionID: 'child', permission: 'read', patterns: ['/etc/*'], metadata: {}, always: [] } });
+    expect(useOpenCodeMobileStore.getState().permissions[sessionStateKey({ ...scope, sessionId: 'child' })].map((r) => r.id)).toEqual(['per_live']);
+
+    handlers[0].handler({ type: 'permission.replied', directory: '/repo', properties: { sessionID: 'child', requestID: 'per_live', reply: 'once' } });
+    expect(useOpenCodeMobileStore.getState().permissions[sessionStateKey({ ...scope, sessionId: 'child' })]).toEqual([]);
+
+    handlers[0].handler({ type: 'message.updated', properties: { info: { id: 'm', sessionID: 'child', role: 'assistant' } } });
+    expect(useOpenCodeMobileStore.getState().messages[sessionStateKey({ ...scope, sessionId: 'child' })]).toBeUndefined();
+    useOpenCodeMobileStore.getState().stopAttentionWatch();
+  });
+
+  it('records why a session stopped, from any directory, until a new turn starts', async () => {
+    const { OpenCodeClient } = await import('@/src/opencode/client');
+    const handlers: Array<(event: any) => void> = [];
+    vi.spyOn(OpenCodeClient.prototype, 'subscribeEvents').mockImplementation((handler) => {
+      handlers.push(handler);
+      return () => undefined;
+    });
+    vi.spyOn(OpenCodeClient.prototype, 'listQuestions').mockResolvedValue([]);
+    vi.spyOn(OpenCodeClient.prototype, 'listPermissions').mockResolvedValue([]);
+    const { sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+    const childKey = sessionStateKey({ connectionId: host.id, relayTargetID: 'mac', sessionId: 'child' });
+    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id, activeSessionRef: null, sessionFailures: {},
+      relayTargets: { [host.id]: [{ id: 'mac', name: 'Mac', reachable: true, lastChecked: null }] },
+      sessions: { [host.id]: [{ id: 'root', relayTargetID: 'mac', directory: '/repo' }, { id: 'child', parentID: 'root', relayTargetID: 'mac', directory: '/repo' }] },
+    });
+    useOpenCodeMobileStore.getState().startAttentionWatch();
+
+    handlers[0]({ id: 'evt_1', type: 'session.error', directory: '/repo', properties: { sessionID: 'child', error: {
+      name: 'APIError', data: { message: 'Internal Server Error: No available Claude accounts support the requested model', statusCode: 500 },
+    } } });
+    expect(useOpenCodeMobileStore.getState().sessionFailures[childKey]).toMatchObject({
+      id: 'evt_1', title: 'API error · 500', message: 'Internal Server Error: No available Claude accounts support the requested model',
+    });
+    expect(useOpenCodeMobileStore.getState().sessionStatuses[childKey]).toEqual({ type: 'idle' });
+
+    handlers[0]({ type: 'session.status', directory: '/repo', properties: { sessionID: 'child', status: { type: 'busy' } } });
+    expect(useOpenCodeMobileStore.getState().sessionFailures[childKey]).toBeNull();
+
+    handlers[0]({ type: 'session.error', directory: '/repo', properties: { sessionID: 'child', error: { name: 'MessageAbortedError', data: { message: 'Aborted' } } } });
+    expect(useOpenCodeMobileStore.getState().sessionFailures[childKey]).toBeNull();
+    useOpenCodeMobileStore.getState().stopAttentionWatch();
+  });
+
+  it('answering a subagent\'s permission from the parent removes it where it is filed', async () => {
+    const { OpenCodeClient } = await import('@/src/opencode/client');
+    const respond = vi.spyOn(OpenCodeClient.prototype, 'respondToPermission').mockResolvedValue(undefined);
+    const { sessionStateKey, useOpenCodeMobileStore } = await import('./mobile-store');
+    const parent = { connectionId: host.id, relayTargetID: 'mac', sessionId: 'root' };
+    const childKey = sessionStateKey({ ...parent, sessionId: 'child' });
+    useOpenCodeMobileStore.setState({ connections: [host], activeConnectionId: host.id,
+      sessions: { [host.id]: [{ id: 'root', relayTargetID: 'mac', directory: '/repo' }] },
+      permissions: { [childKey]: [{ id: 'per_child', sessionID: 'child', permission: 'bash', patterns: [], metadata: {}, always: [] }] },
+    });
+
+    await useOpenCodeMobileStore.getState().respondToPermission(parent, 'per_child', 'allow-once');
+
+    expect(respond).toHaveBeenCalledWith('root', 'per_child', expect.anything(), expect.objectContaining({ directory: '/repo' }));
+    expect(useOpenCodeMobileStore.getState().permissions[childKey]).toEqual([]);
   });
 
   it('refuses ambiguous bare session IDs instead of guessing a relay machine', async () => {
@@ -1291,3 +1569,38 @@ function jsonResponse(body: unknown, status = 200, responseHeaders: Record<strin
 function emptyResponse(status = 204) {
   return new Response(null, { status });
 }
+
+describe('error events from the machine', () => {
+  it('reads the message out of the shape the server actually sends', async () => {
+    // A failed turn arrives as an event, not as a failed request. The server's
+    // shape is { name, data: { message } }.
+    const { serverEventErrorText } = await import('./mobile-store');
+
+    expect(serverEventErrorText({
+      error: { name: 'UnknownError', data: { message: 'model gpt-9 is not available' } },
+    })).toBe('model gpt-9 is not available');
+  });
+
+  it('falls back through the shapes an older or newer server might use', async () => {
+    const { serverEventErrorText } = await import('./mobile-store');
+
+    expect(serverEventErrorText({ error: { message: 'boom' } })).toBe('boom');
+    expect(serverEventErrorText({ message: 'flat message' })).toBe('flat message');
+    expect(serverEventErrorText({ error: { name: 'RateLimited' } })).toBe('RateLimited');
+  });
+
+  it('says something rather than nothing when the shape is unrecognised', async () => {
+    // Silence is the bug being fixed: an unreadable error must not read as
+    // "the machine simply produced no output".
+    const { serverEventErrorText } = await import('./mobile-store');
+
+    expect(serverEventErrorText({ error: { code: 42 } })).toContain('no description');
+  });
+
+  it('ignores an empty string, which would otherwise render as no error at all', async () => {
+    const { serverEventErrorText } = await import('./mobile-store');
+
+    expect(serverEventErrorText({ error: { message: '   ', name: 'ProviderError' } }))
+      .toBe('ProviderError');
+  });
+});

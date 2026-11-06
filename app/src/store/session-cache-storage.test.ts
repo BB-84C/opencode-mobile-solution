@@ -188,4 +188,27 @@ describe('session cache storage', () => {
       expect(JSON.stringify(messages).length).toBeLessThanOrEqual(MAX_CACHED_TRANSCRIPT_JSON_CHARS);
     }
   });
+
+  it('keeps a message with an inline attachment, without the attachment bytes', async () => {
+    const { selectCacheableTranscript, MAX_CACHED_TRANSCRIPT_JSON_CHARS } = await import('./session-cache-storage');
+    const inline = `data:image/jpeg;base64,${'A'.repeat(MAX_CACHED_TRANSCRIPT_JSON_CHARS)}`;
+    const messages: MessageWithParts[] = [{
+      info: { id: 'with-photo', role: 'user', sessionID: 's' },
+      parts: [
+        { type: 'text', text: 'what is this?' },
+        { type: 'file', mime: 'image/jpeg', filename: 'shot.jpg', url: inline },
+        { type: 'file', mime: 'text/plain', filename: 'notes.txt', url: 'file:///repo/notes.txt' },
+      ],
+    }];
+
+    const cached = selectCacheableTranscript(messages);
+
+    expect(cached.map((message) => message.info.id)).toEqual(['with-photo']);
+    expect(cached[0].parts).toEqual([
+      { type: 'text', text: 'what is this?' },
+      { type: 'file', mime: 'image/jpeg', filename: 'shot.jpg' },
+      { type: 'file', mime: 'text/plain', filename: 'notes.txt', url: 'file:///repo/notes.txt' },
+    ]);
+    expect(messages[0].parts[1]).toHaveProperty('url', inline);
+  });
 });

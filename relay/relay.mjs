@@ -25,6 +25,7 @@
 
 import http from 'node:http';
 import fs from 'node:fs';
+import { preflightHeaders, responseHeaders } from './lib/cors.mjs';
 import path from 'node:path';
 import { authenticateBearer, resolveScope } from './lib/auth.mjs';
 import { startConfigReloader } from './lib/config.mjs';
@@ -239,12 +240,7 @@ const server = http.createServer(async (req, res) => {
 
     // CORS preflight (mobile apps need this)
     if (req.method === 'OPTIONS') {
-        res.writeHead(204, {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
-            'Access-Control-Allow-Headers': 'Authorization,Content-Type,X-OpenCode-Directory,X-OpenCode-Target',
-            'Access-Control-Max-Age': '86400',
-        });
+        res.writeHead(204, preflightHeaders());
         return res.end();
     }
 

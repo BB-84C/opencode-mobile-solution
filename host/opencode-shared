@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# opencode-shared — 挂到与手机、分机共用的那个后端上，而不是另起一个本地实例。
+#
+# 直接跑 `opencode` 会在本机开一个独立进程，它有自己的会话库，手机上看不到。
+# 这个脚本改成 attach 到 127.0.0.1:4096 上那个由 systemd 托管的后端，
+# 于是这台总机、手机、以及任何配对过的分机看到的是同一份会话列表。
+#
+# 凭据从 backend.env 读进环境变量，不出现在命令行上，所以不会进 ps 和 shell 历史。
+# `opencode attach` 自己会认 OPENCODE_SERVER_USERNAME / OPENCODE_SERVER_PASSWORD。
+#
+# 用法与 opencode 一致，参数原样透传：
+#   opencode-shared                      # 当前目录
+#   opencode-shared -c                   # 续上一个会话
+#   opencode-shared -s ses_xxx           # 指定会话
+#   opencode-shared --dir /path/to/proj  # 指定目录
+
+set -u
+
+CONFIG_DIR="${OPENCODE_COCKPIT_CONFIG:-$HOME/.config/opencode-cockpit}"
+ENV_FILE="$CONFIG_DIR/backend.env"
+BACKEND_URL="${OPENCODE_SHARED_URL:-http://127.0.0.1:4096}"
+
+if [ ! -r "$ENV_FILE" ]; then
+  echo "opencode-shared: 读不到 $ENV_FILE" >&2
+  echo "  这台机器可能还没部署 cockpit，或者配置目录被移动了。" >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+set +a
+
+if [ -z "${OPENCODE_SERVER_PASSWORD:-}" ]; then
+  echo "opencode-shared: $ENV_FILE 里没有 OPENCODE_SERVER_PASSWORD" >&2
+  exit 1
+fi
+
+# 后端没起来就直说，不要让 attach 抛一段看不懂的连接错误。
+if ! curl -fsS --max-time 5 -u "$OPENCODE_SERVER_USERNAME:$OPENCODE_SERVER_PASSWORD" \
+     "$BACKEND_URL/global/health" >/dev/null 2>&1; then
+  echo "opencode-shared: $BACKEND_URL 上的后端没有响应" >&2
+  echo "  查一下：systemctl --user status opencode-backend.service" >&2
+  exit 1
+fi
+
+# 用户自己传了 --dir 就尊重它，否则默认用当前目录。
+# 后端按工作目录给会话分域，不显式指定的话会落到服务进程自己的目录下，
+# 那样在这里看到的会话列表和你以为的项目对不上。
+has_dir=0
+for arg in "$@"; do
+  case "$arg" in
+    --dir|--dir=*) has_dir=1; break ;;
+  esac
+done
+
+if [ "$has_dir" -eq 1 ]; then
+  exec opencode attach "$BACKEND_URL" "$@"
+else
+  exec opencode attach "$BACKEND_URL" --dir "$PWD" "$@"
+fi

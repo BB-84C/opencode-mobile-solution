@@ -66,11 +66,13 @@ describe('withOpenCodeAppIntents', () => {
   it('keeps the iOS native envelope configured for simulator and App Store builds', () => {
     expect(appConfig.expo.ios).toMatchObject({
       supportsTablet: true,
-      bundleIdentifier: 'com.example.opencodemobile',
       config: {
         usesNonExemptEncryption: false,
       },
     });
+    // Deliberately a shape check, not an exact value: each deployment signs with
+    // its own id, and pinning one reddens the suite for whoever changes it.
+    expect(appConfig.expo.ios.bundleIdentifier).toMatch(/^[A-Za-z][A-Za-z0-9-]*(\.[A-Za-z][A-Za-z0-9-]*)+$/);
   });
 
   it('writes the generated Swift file into the iOS app target folder', () => {

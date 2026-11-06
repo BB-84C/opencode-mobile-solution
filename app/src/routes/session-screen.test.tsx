@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   routeParams: { sessionKey: '' },
   replace: vi.fn(),
   clipboardRead: vi.fn(async () => 'clipboard'),
+  pickAttachments: vi.fn(),
   clipboardWrite: vi.fn(async () => undefined),
   keyboardDismiss: vi.fn(),
   scrollToLatest: vi.fn(),
@@ -53,6 +54,9 @@ const mocks = vi.hoisted(() => ({
     permissionErrors: {},
     sessionLoadStates: { [JSON.stringify(['relay', 'mac', 'root'])]: 'idle' },
     sessionErrors: {},
+    sessionFailures: {} as Record<string, any>,
+    dismissSessionFailure: vi.fn(),
+    todos: {} as Record<string, any[]>,
     eventConnectionStates: { [JSON.stringify(['relay', 'mac', 'root'])]: 'live' },
     machineContracts: {
       [JSON.stringify(['relay', 'mac', '/repo'])]: {
@@ -77,7 +81,7 @@ const mocks = vi.hoisted(() => ({
     subscribeToActiveHost: vi.fn(),
     unsubscribeFromHost: vi.fn(),
     searchFileReferences: vi.fn(async () => []),
-    sendPrompt: vi.fn(async () => 'root'),
+    sendPrompt: vi.fn(async (): Promise<string | null> => 'root'),
     respondToPermission: vi.fn(async () => undefined),
     respondToQuestion: vi.fn(async () => undefined),
     rejectQuestion: vi.fn(async () => undefined),
@@ -187,6 +191,8 @@ vi.mock('@/src/components/opencode/MessageCard', async () => {
   };
 });
 
+vi.mock('@/src/ux/attachment-picker', () => ({ pickAttachments: mocks.pickAttachments }));
+
 vi.mock('@/src/components/opencode/ActionModal', async () => {
   const React = await import('react');
   return {
@@ -233,6 +239,60 @@ describe('SessionScreen composite route', () => {
     mocks.state.messageNextCursors = { [rootKey]: null };
     mocks.state.olderMessageLoadStates = {};
     mocks.state.olderMessageErrors = {};
+    mocks.state.todos = {};
+    mocks.state.sessionFailures = {};
+    mocks.state.dismissSessionFailure.mockClear();
+    mocks.state.sessionStatuses = {};
+  });
+
+  it('shows the todo list as a folded bar on a phone that expands to every item', async () => {
+    mocks.state.todos = { [rootKey]: [
+      { content: 'Read the code', status: 'completed', priority: 'high' },
+      { content: 'Write the test', status: 'in_progress', priority: 'high' },
+      { content: 'Fix it', status: 'pending', priority: 'medium' },
+    ] };
+    const screen = await renderScreen();
+    expect(text(screen)).toContain('Todos');
+    expect(text(screen)).toContain('1/3');
+    expect(text(screen)).toContain('Now: Write the test');
+    expect(all(screen, 'todo-panel-list')).toHaveLength(0);
+    expect(text(screen)).not.toContain('Fix it');
+
+    await act(async () => find(screen, 'todo-panel-toggle').props.onPress());
+    expect(all(screen, 'todo-panel-list').length).toBeGreaterThan(0);
+    expect(text(screen)).toContain('[✓]');
+    expect(text(screen)).toContain('Fix it');
+  });
+
+  it('hides the todo panel when the agent made no list', async () => {
+    const screen = await renderScreen();
+    expect(all(screen, 'todo-panel')).toHaveLength(0);
+  });
+
+  it('shows why the session stopped in a red box that can be dismissed', async () => {
+    mocks.state.sessionFailures = { [rootKey]: { id: 'evt_1', title: 'API error · 500', message: 'No available Claude accounts support the requested model', at: 1 } };
+    const screen = await renderScreen();
+    expect(text(screen)).toContain('API error · 500');
+    expect(text(screen)).toContain('No available Claude accounts support the requested model');
+    await act(async () => find(screen, 'session-turn-failure-dismiss').props.onPress());
+    expect(mocks.state.dismissSessionFailure).toHaveBeenCalledWith(rootKey);
+  });
+
+  it('does not repeat a failure the transcript already shows on the last reply', async () => {
+    mocks.state.sessionFailures = { [rootKey]: { id: 'evt_1', title: 'API error · 500', message: 'boom', at: 1 } };
+    mocks.state.messages[rootKey] = [
+      { info: { id: 'm1', role: 'user', sessionID: 'root' }, parts: [{ type: 'text', text: 'hello root' }] },
+      { info: { id: 'm2', role: 'assistant', sessionID: 'root', error: { name: 'APIError', data: { message: 'boom', statusCode: 500 } } } as any, parts: [] },
+    ];
+    const screen = await renderScreen();
+    expect(all(screen, 'session-turn-failure')).toHaveLength(0);
+  });
+
+  it('says when the machine is retrying a failed request', async () => {
+    mocks.state.sessionStatuses = { [rootKey]: { type: 'retry', attempt: 2, message: 'Cannot connect to API: socket closed' } as any };
+    const screen = await renderScreen();
+    expect(text(screen)).toContain('Retrying · attempt 2');
+    expect(text(screen)).toContain('Cannot connect to API: socket closed');
   });
 
   it('opens the exact machine-scoped ref, subscribes, and never reads the clipboard on mount', async () => {
@@ -339,7 +399,53 @@ describe('SessionScreen composite route', () => {
 
     await act(async () => find(screen, 'session-prompt-input').props.onChangeText('continue existing')); 
     await act(async () => find(screen, 'send-prompt-button').props.onPress());
-    expect(mocks.state.sendPrompt).toHaveBeenCalledWith('continue existing');
+    expect(mocks.state.sendPrompt).toHaveBeenCalledWith('continue existing', []);
+  });
+
+  it('keeps the @ mention on its own button, separate from attaching', async () => {
+    const screen = await renderScreen();
+    await act(async () => find(screen, 'session-accessory-reference').props.onPress());
+    expect(find(screen, 'session-prompt-input').props.value).toBe('@');
+    expect(all(screen, 'modal-Attach')).toHaveLength(0);
+  });
+
+  it('attaches a picked photo, sends it with no text, and clears it after sending', async () => {
+    const photo = { id: 'att-1', filename: 'shot.jpg', mime: 'image/jpeg', size: 2048, dataUrl: 'data:image/jpeg;base64,AAAA' };
+    mocks.pickAttachments.mockReset();
+    mocks.pickAttachments.mockResolvedValue({ attachments: [photo], rejected: [] });
+    const screen = await renderScreen();
+    expect(find(screen, 'send-prompt-button').props.disabled).toBe(true);
+
+    await act(async () => find(screen, 'session-accessory-attach').props.onPress());
+    expect(find(screen, 'session-prompt-input').props.value).toBe('');
+    await act(async () => find(screen, 'action-attach-photos').props.onPress());
+    expect(mocks.pickAttachments).toHaveBeenCalledWith('photos', []);
+    expect(text(screen)).toContain('shot.jpg');
+    expect(text(screen)).toContain('2 KB');
+    expect(find(screen, 'send-prompt-button').props.disabled).toBe(false);
+
+    await act(async () => find(screen, 'send-prompt-button').props.onPress());
+    expect(mocks.state.sendPrompt).toHaveBeenCalledWith('', [photo]);
+    expect(all(screen, 'session-attachment-att-1')).toHaveLength(0);
+  });
+
+  it('keeps the attachment when sending fails, and lets it be removed', async () => {
+    const photo = { id: 'att-2', filename: 'plot.png', mime: 'image/png', size: 10, dataUrl: 'data:image/png;base64,AAAA' };
+    mocks.pickAttachments.mockReset();
+    mocks.pickAttachments.mockResolvedValue({ attachments: [photo], rejected: ['big.pdf is 30 MB; PDFs are limited to 20 MB.'] });
+    mocks.state.sendPrompt.mockResolvedValueOnce(null);
+    const screen = await renderScreen();
+
+    await act(async () => find(screen, 'session-accessory-attach').props.onPress());
+    await act(async () => find(screen, 'action-attach-files').props.onPress());
+    expect(text(screen)).toContain('PDFs are limited to 20 MB');
+
+    await act(async () => find(screen, 'send-prompt-button').props.onPress());
+    expect(find(screen, 'session-attachment-att-2')).toBeTruthy();
+
+    await act(async () => find(screen, 'session-attachment-remove-att-2').props.onPress());
+    expect(all(screen, 'session-attachment-att-2')).toHaveLength(0);
+    expect(find(screen, 'send-prompt-button').props.disabled).toBe(true);
   });
 
   it('surfaces a standalone permission without a transcript permission part and blocks prompt dispatch', async () => {
@@ -351,6 +457,18 @@ describe('SessionScreen composite route', () => {
     expect(find(screen, 'send-prompt-button').props.disabled).toBe(true);
     await act(async () => find(screen, 'permission-request-per_gate-allow-once').props.onPress());
     expect(mocks.state.respondToPermission).toHaveBeenCalledWith(rootRef, 'per_gate', 'allow-once', undefined);
+  });
+
+  it('shows a subagent\'s permission on the parent, labelled, without locking the parent prompt', async () => {
+    mocks.state.permissions[childKey] = [{ id: 'per_child', sessionID: 'child', permission: 'bash', patterns: ['npm test'], metadata: { command: 'npm test' }, always: [] }];
+    const screen = await renderScreen();
+    expect(find(screen, 'permission-request-per_child')).toBeTruthy();
+    expect(text(screen)).toContain('From subagent');
+    await act(async () => find(screen, 'session-prompt-input').props.onChangeText('keep going'));
+    expect(find(screen, 'send-prompt-button').props.disabled).toBe(false);
+    await act(async () => find(screen, 'permission-request-per_child-allow-once').props.onPress());
+    expect(mocks.state.respondToPermission).toHaveBeenCalledWith(rootRef, 'per_child', 'allow-once', undefined);
+    delete mocks.state.permissions[childKey];
   });
 
   it('renders the complete conversation component at arbitrary depth', async () => {

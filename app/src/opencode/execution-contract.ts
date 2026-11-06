@@ -223,6 +223,11 @@ export function modelRefKey(ref: ModelRef): string {
   return `${ref.providerID}/${ref.modelID}`;
 }
 
+export function findContractModel(contract: PromptExecutionContract, ref: ModelRef): ConfiguredModelEntry | undefined {
+  const key = modelRefKey(ref);
+  return flattenConfiguredModels(providersResponse(contract)).find((entry) => entry.key === key);
+}
+
 export function isSelectableAgent(agent: Agent): boolean {
   return !agent.hidden && agent.mode !== 'subagent';
 }

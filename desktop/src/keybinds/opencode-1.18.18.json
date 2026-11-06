@@ -1,0 +1,922 @@
+[
+ {
+  "action": "leader",
+  "default": "ctrl+x",
+  "description": "Leader key for keybind combinations"
+ },
+ {
+  "action": "app_exit",
+  "default": "ctrl+c,ctrl+d,<leader>q",
+  "description": "Exit the application"
+ },
+ {
+  "action": "app_debug",
+  "default": "none",
+  "description": "Toggle debug panel"
+ },
+ {
+  "action": "app_console",
+  "default": "none",
+  "description": "Toggle console"
+ },
+ {
+  "action": "app_heap_snapshot",
+  "default": "none",
+  "description": "Write heap snapshot"
+ },
+ {
+  "action": "app_toggle_animations",
+  "default": "none",
+  "description": "Toggle animations"
+ },
+ {
+  "action": "app_toggle_file_context",
+  "default": "none",
+  "description": "Toggle file context"
+ },
+ {
+  "action": "app_toggle_diffwrap",
+  "default": "none",
+  "description": "Toggle diff wrapping"
+ },
+ {
+  "action": "app_toggle_paste_summary",
+  "default": "none",
+  "description": "Toggle paste summary"
+ },
+ {
+  "action": "app_toggle_session_directory_filter",
+  "default": "none",
+  "description": "Toggle session directory filtering"
+ },
+ {
+  "action": "command_list",
+  "default": "ctrl+p",
+  "description": "List available commands"
+ },
+ {
+  "action": "help_show",
+  "default": "none",
+  "description": "Open help dialog"
+ },
+ {
+  "action": "docs_open",
+  "default": "none",
+  "description": "Open documentation"
+ },
+ {
+  "action": "diff_open",
+  "default": "none",
+  "description": "Open diff viewer"
+ },
+ {
+  "action": "diff_close",
+  "default": "escape,q",
+  "description": "Close diff viewer"
+ },
+ {
+  "action": "diff_toggle",
+  "default": "enter,space",
+  "description": "Toggle diff viewer item"
+ },
+ {
+  "action": "diff_expand",
+  "default": "right",
+  "description": "Expand diff viewer item"
+ },
+ {
+  "action": "diff_expand_all",
+  "default": "E",
+  "description": "Expand all diff viewer folders"
+ },
+ {
+  "action": "diff_collapse",
+  "default": "left",
+  "description": "Collapse diff viewer item"
+ },
+ {
+  "action": "diff_switch_focus",
+  "default": "tab",
+  "description": "Switch diff viewer focus"
+ },
+ {
+  "action": "diff_next_hunk",
+  "default": "]",
+  "description": "Jump to next diff hunk"
+ },
+ {
+  "action": "diff_previous_hunk",
+  "default": "[",
+  "description": "Jump to previous diff hunk"
+ },
+ {
+  "action": "diff_next_file",
+  "default": "n",
+  "description": "Jump to next diff file"
+ },
+ {
+  "action": "diff_previous_file",
+  "default": "p",
+  "description": "Jump to previous diff file"
+ },
+ {
+  "action": "diff_toggle_file_tree",
+  "default": "b",
+  "description": "Toggle diff viewer file tree"
+ },
+ {
+  "action": "diff_single_patch",
+  "default": "s",
+  "description": "Toggle single patch view"
+ },
+ {
+  "action": "diff_switch_source",
+  "default": "d",
+  "description": "Switch diff viewer source"
+ },
+ {
+  "action": "diff_toggle_view",
+  "default": "v",
+  "description": "Toggle diff viewer split or unified view"
+ },
+ {
+  "action": "diff_help",
+  "default": "?",
+  "description": "Show more diff viewer shortcuts"
+ },
+ {
+  "action": "editor_open",
+  "default": "<leader>e",
+  "description": "Open external editor"
+ },
+ {
+  "action": "theme_list",
+  "default": "<leader>t",
+  "description": "List available themes"
+ },
+ {
+  "action": "theme_switch_mode",
+  "default": "none",
+  "description": "Switch between light and dark theme mode"
+ },
+ {
+  "action": "theme_mode_lock",
+  "default": "none",
+  "description": "Lock or unlock theme mode"
+ },
+ {
+  "action": "sidebar_toggle",
+  "default": "<leader>b",
+  "description": "Toggle sidebar"
+ },
+ {
+  "action": "scrollbar_toggle",
+  "default": "none",
+  "description": "Toggle session scrollbar"
+ },
+ {
+  "action": "status_view",
+  "default": "<leader>s",
+  "description": "View status"
+ },
+ {
+  "action": "debug_view",
+  "default": "none",
+  "description": "View debug info"
+ },
+ {
+  "action": "session_export",
+  "default": "<leader>x",
+  "description": "Export session to editor"
+ },
+ {
+  "action": "session_copy",
+  "default": "none",
+  "description": "Copy session transcript"
+ },
+ {
+  "action": "session_move",
+  "default": "none",
+  "description": "Move session"
+ },
+ {
+  "action": "session_new",
+  "default": "<leader>n",
+  "description": "Create a new session"
+ },
+ {
+  "action": "session_list",
+  "default": "<leader>l",
+  "description": "List all sessions"
+ },
+ {
+  "action": "session_timeline",
+  "default": "<leader>g",
+  "description": "Show session timeline"
+ },
+ {
+  "action": "session_fork",
+  "default": "none",
+  "description": "Fork session from message"
+ },
+ {
+  "action": "session_rename",
+  "default": "ctrl+r",
+  "description": "Rename session"
+ },
+ {
+  "action": "session_delete",
+  "default": "ctrl+d",
+  "description": "Delete session"
+ },
+ {
+  "action": "session_share",
+  "default": "none",
+  "description": "Share current session"
+ },
+ {
+  "action": "session_unshare",
+  "default": "none",
+  "description": "Unshare current session"
+ },
+ {
+  "action": "session_interrupt",
+  "default": "escape",
+  "description": "Interrupt current session"
+ },
+ {
+  "action": "session_background",
+  "default": "ctrl+b",
+  "description": "Background synchronous subagents"
+ },
+ {
+  "action": "session_compact",
+  "default": "<leader>c",
+  "description": "Compact the session"
+ },
+ {
+  "action": "session_toggle_timestamps",
+  "default": "none",
+  "description": "Toggle message timestamps"
+ },
+ {
+  "action": "session_toggle_generic_tool_output",
+  "default": "none",
+  "description": "Toggle generic tool output"
+ },
+ {
+  "action": "session_queued_prompts",
+  "default": "<leader>q",
+  "description": "Manage queued prompts"
+ },
+ {
+  "action": "session_child_first",
+  "default": "<leader>down",
+  "description": "Go to first child session"
+ },
+ {
+  "action": "session_child_cycle",
+  "default": "right",
+  "description": "Go to next child session"
+ },
+ {
+  "action": "session_child_cycle_reverse",
+  "default": "left",
+  "description": "Go to previous child session"
+ },
+ {
+  "action": "session_parent",
+  "default": "up",
+  "description": "Go to parent session"
+ },
+ {
+  "action": "session_pin_toggle",
+  "default": "ctrl+f",
+  "description": "Pin or unpin session in the session list"
+ },
+ {
+  "action": "session_quick_switch_1",
+  "default": "<leader>1",
+  "description": "Switch to session in quick slot 1"
+ },
+ {
+  "action": "session_quick_switch_2",
+  "default": "<leader>2",
+  "description": "Switch to session in quick slot 2"
+ },
+ {
+  "action": "session_quick_switch_3",
+  "default": "<leader>3",
+  "description": "Switch to session in quick slot 3"
+ },
+ {
+  "action": "session_quick_switch_4",
+  "default": "<leader>4",
+  "description": "Switch to session in quick slot 4"
+ },
+ {
+  "action": "session_quick_switch_5",
+  "default": "<leader>5",
+  "description": "Switch to session in quick slot 5"
+ },
+ {
+  "action": "session_quick_switch_6",
+  "default": "<leader>6",
+  "description": "Switch to session in quick slot 6"
+ },
+ {
+  "action": "session_quick_switch_7",
+  "default": "<leader>7",
+  "description": "Switch to session in quick slot 7"
+ },
+ {
+  "action": "session_quick_switch_8",
+  "default": "<leader>8",
+  "description": "Switch to session in quick slot 8"
+ },
+ {
+  "action": "session_quick_switch_9",
+  "default": "<leader>9",
+  "description": "Switch to session in quick slot 9"
+ },
+ {
+  "action": "stash_delete",
+  "default": "ctrl+d",
+  "description": "Delete stash entry"
+ },
+ {
+  "action": "model_provider_list",
+  "default": "ctrl+a",
+  "description": "Open provider list from model dialog"
+ },
+ {
+  "action": "model_favorite_toggle",
+  "default": "ctrl+f",
+  "description": "Toggle model favorite status"
+ },
+ {
+  "action": "model_list",
+  "default": "<leader>m",
+  "description": "List available models"
+ },
+ {
+  "action": "model_cycle_recent",
+  "default": "f2",
+  "description": "Next recently used model"
+ },
+ {
+  "action": "model_cycle_recent_reverse",
+  "default": "shift+f2",
+  "description": "Previous recently used model"
+ },
+ {
+  "action": "model_cycle_favorite",
+  "default": "none",
+  "description": "Next favorite model"
+ },
+ {
+  "action": "model_cycle_favorite_reverse",
+  "default": "none",
+  "description": "Previous favorite model"
+ },
+ {
+  "action": "mcp_list",
+  "default": "none",
+  "description": "List MCP servers"
+ },
+ {
+  "action": "provider_connect",
+  "default": "none",
+  "description": "Connect provider"
+ },
+ {
+  "action": "console_org_switch",
+  "default": "none",
+  "description": "Switch console organization"
+ },
+ {
+  "action": "agent_list",
+  "default": "<leader>a",
+  "description": "List agents"
+ },
+ {
+  "action": "agent_cycle",
+  "default": "tab",
+  "description": "Next agent"
+ },
+ {
+  "action": "agent_cycle_reverse",
+  "default": "shift+tab",
+  "description": "Previous agent"
+ },
+ {
+  "action": "variant_cycle",
+  "default": "ctrl+t",
+  "description": "Cycle model variants"
+ },
+ {
+  "action": "variant_list",
+  "default": "none",
+  "description": "List model variants"
+ },
+ {
+  "action": "messages_page_up",
+  "default": "pageup,ctrl+alt+b",
+  "description": "Scroll messages up by one page"
+ },
+ {
+  "action": "messages_page_down",
+  "default": "pagedown,ctrl+alt+f",
+  "description": "Scroll messages down by one page"
+ },
+ {
+  "action": "messages_line_up",
+  "default": "ctrl+alt+y",
+  "description": "Scroll messages up by one line"
+ },
+ {
+  "action": "messages_line_down",
+  "default": "ctrl+alt+e",
+  "description": "Scroll messages down by one line"
+ },
+ {
+  "action": "messages_half_page_up",
+  "default": "ctrl+alt+u",
+  "description": "Scroll messages up by half page"
+ },
+ {
+  "action": "messages_half_page_down",
+  "default": "ctrl+alt+d",
+  "description": "Scroll messages down by half page"
+ },
+ {
+  "action": "messages_first",
+  "default": "ctrl+g,home",
+  "description": "Navigate to first message"
+ },
+ {
+  "action": "messages_last",
+  "default": "ctrl+alt+g,end",
+  "description": "Navigate to last message"
+ },
+ {
+  "action": "messages_next",
+  "default": "none",
+  "description": "Navigate to next message"
+ },
+ {
+  "action": "messages_previous",
+  "default": "none",
+  "description": "Navigate to previous message"
+ },
+ {
+  "action": "messages_last_user",
+  "default": "none",
+  "description": "Navigate to last user message"
+ },
+ {
+  "action": "messages_copy",
+  "default": "<leader>y",
+  "description": "Copy message"
+ },
+ {
+  "action": "messages_undo",
+  "default": "<leader>u",
+  "description": "Undo message"
+ },
+ {
+  "action": "messages_redo",
+  "default": "<leader>r",
+  "description": "Redo message"
+ },
+ {
+  "action": "messages_toggle_conceal",
+  "default": "<leader>h",
+  "description": "Toggle code block concealment in messages"
+ },
+ {
+  "action": "tool_details",
+  "default": "none",
+  "description": "Toggle tool details visibility"
+ },
+ {
+  "action": "display_thinking",
+  "default": "none",
+  "description": "Toggle thinking blocks visibility"
+ },
+ {
+  "action": "prompt_submit",
+  "default": "none",
+  "description": "Submit prompt"
+ },
+ {
+  "action": "prompt_editor_context_clear",
+  "default": "none",
+  "description": "Clear editor context"
+ },
+ {
+  "action": "prompt_skills",
+  "default": "none",
+  "description": "Open skill selector"
+ },
+ {
+  "action": "prompt_stash",
+  "default": "none",
+  "description": "Stash prompt"
+ },
+ {
+  "action": "prompt_stash_pop",
+  "default": "none",
+  "description": "Pop stashed prompt"
+ },
+ {
+  "action": "prompt_stash_list",
+  "default": "none",
+  "description": "List stashed prompts"
+ },
+ {
+  "action": "workspace_set",
+  "default": "none",
+  "description": "Set workspace"
+ },
+ {
+  "action": "input_clear",
+  "default": "ctrl+c",
+  "description": "Clear input field"
+ },
+ {
+  "action": "input_paste",
+  "default": "ctrl+v",
+  "description": "Paste from clipboard"
+ },
+ {
+  "action": "input_submit",
+  "default": "return",
+  "description": "Submit input"
+ },
+ {
+  "action": "input_newline",
+  "default": "shift+return,ctrl+return,alt+return,ctrl+j",
+  "description": "Insert newline in input"
+ },
+ {
+  "action": "input_move_left",
+  "default": "left,ctrl+b",
+  "description": "Move cursor left in input"
+ },
+ {
+  "action": "input_move_right",
+  "default": "right,ctrl+f",
+  "description": "Move cursor right in input"
+ },
+ {
+  "action": "input_move_up",
+  "default": "up",
+  "description": "Move cursor up in input"
+ },
+ {
+  "action": "input_move_down",
+  "default": "down",
+  "description": "Move cursor down in input"
+ },
+ {
+  "action": "input_select_left",
+  "default": "shift+left",
+  "description": "Select left in input"
+ },
+ {
+  "action": "input_select_right",
+  "default": "shift+right",
+  "description": "Select right in input"
+ },
+ {
+  "action": "input_select_up",
+  "default": "shift+up",
+  "description": "Select up in input"
+ },
+ {
+  "action": "input_select_down",
+  "default": "shift+down",
+  "description": "Select down in input"
+ },
+ {
+  "action": "input_line_home",
+  "default": "ctrl+a",
+  "description": "Move to start of line in input"
+ },
+ {
+  "action": "input_line_end",
+  "default": "ctrl+e",
+  "description": "Move to end of line in input"
+ },
+ {
+  "action": "input_select_line_home",
+  "default": "ctrl+shift+a",
+  "description": "Select to start of line in input"
+ },
+ {
+  "action": "input_select_line_end",
+  "default": "ctrl+shift+e",
+  "description": "Select to end of line in input"
+ },
+ {
+  "action": "input_visual_line_home",
+  "default": "alt+a",
+  "description": "Move to start of visual line in input"
+ },
+ {
+  "action": "input_visual_line_end",
+  "default": "alt+e",
+  "description": "Move to end of visual line in input"
+ },
+ {
+  "action": "input_select_visual_line_home",
+  "default": "alt+shift+a",
+  "description": "Select to start of visual line in input"
+ },
+ {
+  "action": "input_select_visual_line_end",
+  "default": "alt+shift+e",
+  "description": "Select to end of visual line in input"
+ },
+ {
+  "action": "input_buffer_home",
+  "default": "home",
+  "description": "Move to start of buffer in input"
+ },
+ {
+  "action": "input_buffer_end",
+  "default": "end",
+  "description": "Move to end of buffer in input"
+ },
+ {
+  "action": "input_select_buffer_home",
+  "default": "shift+home",
+  "description": "Select to start of buffer in input"
+ },
+ {
+  "action": "input_select_buffer_end",
+  "default": "shift+end",
+  "description": "Select to end of buffer in input"
+ },
+ {
+  "action": "input_delete_line",
+  "default": "ctrl+shift+d",
+  "description": "Delete line in input"
+ },
+ {
+  "action": "input_delete_to_line_end",
+  "default": "ctrl+k",
+  "description": "Delete to end of line in input"
+ },
+ {
+  "action": "input_delete_to_line_start",
+  "default": "ctrl+u",
+  "description": "Delete to start of line in input"
+ },
+ {
+  "action": "input_backspace",
+  "default": "backspace,shift+backspace",
+  "description": "Backspace in input"
+ },
+ {
+  "action": "input_delete",
+  "default": "ctrl+d,delete,shift+delete",
+  "description": "Delete character in input"
+ },
+ {
+  "action": "input_undo",
+  "default": "ctrl+-,super+z",
+  "description": "Undo in input"
+ },
+ {
+  "action": "input_redo",
+  "default": "ctrl+.,super+shift+z",
+  "description": "Redo in input"
+ },
+ {
+  "action": "input_word_forward",
+  "default": "alt+f,alt+right,ctrl+right",
+  "description": "Move word forward in input"
+ },
+ {
+  "action": "input_word_backward",
+  "default": "alt+b,alt+left,ctrl+left",
+  "description": "Move word backward in input"
+ },
+ {
+  "action": "input_select_word_forward",
+  "default": "alt+shift+f,alt+shift+right",
+  "description": "Select word forward in input"
+ },
+ {
+  "action": "input_select_word_backward",
+  "default": "alt+shift+b,alt+shift+left",
+  "description": "Select word backward in input"
+ },
+ {
+  "action": "input_delete_word_forward",
+  "default": "alt+d,alt+delete,ctrl+delete",
+  "description": "Delete word forward in input"
+ },
+ {
+  "action": "input_delete_word_backward",
+  "default": "ctrl+w,ctrl+backspace,alt+backspace",
+  "description": "Delete word backward in input"
+ },
+ {
+  "action": "input_select_all",
+  "default": "super+a",
+  "description": "Select all in input"
+ },
+ {
+  "action": "history_previous",
+  "default": "up",
+  "description": "Previous history item"
+ },
+ {
+  "action": "history_next",
+  "default": "down",
+  "description": "Next history item"
+ },
+ {
+  "action": "dialog.select.prev",
+  "default": "up,ctrl+p",
+  "description": "Move to previous dialog item"
+ },
+ {
+  "action": "dialog.select.next",
+  "default": "down,ctrl+n",
+  "description": "Move to next dialog item"
+ },
+ {
+  "action": "dialog.select.page_up",
+  "default": "pageup",
+  "description": "Move up one page in dialog"
+ },
+ {
+  "action": "dialog.select.page_down",
+  "default": "pagedown",
+  "description": "Move down one page in dialog"
+ },
+ {
+  "action": "dialog.select.home",
+  "default": "home",
+  "description": "Move to first dialog item"
+ },
+ {
+  "action": "dialog.select.end",
+  "default": "end",
+  "description": "Move to last dialog item"
+ },
+ {
+  "action": "dialog.select.submit",
+  "default": "return",
+  "description": "Submit selected dialog item"
+ },
+ {
+  "action": "dialog.prompt.submit",
+  "default": "return",
+  "description": "Submit dialog prompt"
+ },
+ {
+  "action": "dialog.mcp.toggle",
+  "default": "space",
+  "description": "Toggle MCP in MCP dialog"
+ },
+ {
+  "action": "dialog.move_session.new",
+  "default": "ctrl+m",
+  "description": "New project copy"
+ },
+ {
+  "action": "dialog.move_session.delete",
+  "default": "ctrl+d",
+  "description": "Delete project copy"
+ },
+ {
+  "action": "dialog.move_session.refresh",
+  "default": "ctrl+r",
+  "description": "Refresh project copies"
+ },
+ {
+  "action": "prompt.autocomplete.prev",
+  "default": "up,ctrl+p",
+  "description": "Move to previous autocomplete item"
+ },
+ {
+  "action": "prompt.autocomplete.next",
+  "default": "down,ctrl+n",
+  "description": "Move to next autocomplete item"
+ },
+ {
+  "action": "prompt.autocomplete.hide",
+  "default": "escape",
+  "description": "Hide autocomplete"
+ },
+ {
+  "action": "prompt.autocomplete.select",
+  "default": "return",
+  "description": "Select autocomplete item"
+ },
+ {
+  "action": "prompt.autocomplete.complete",
+  "default": "tab",
+  "description": "Complete autocomplete item"
+ },
+ {
+  "action": "permission.prompt.fullscreen",
+  "default": "ctrl+f",
+  "description": "Toggle permission prompt fullscreen"
+ },
+ {
+  "action": "plugins.toggle",
+  "default": "space",
+  "description": "Toggle plugin"
+ },
+ {
+  "action": "dialog.plugins.install",
+  "default": "shift+i",
+  "description": "Install plugin from plugin dialog"
+ },
+ {
+  "action": "terminal_suspend",
+  "default": "ctrl+z",
+  "description": "Suspend terminal"
+ },
+ {
+  "action": "terminal_title_toggle",
+  "default": "none",
+  "description": "Toggle terminal title"
+ },
+ {
+  "action": "tips_toggle",
+  "default": "<leader>h",
+  "description": "Toggle tips on home screen"
+ },
+ {
+  "action": "plugin_manager",
+  "default": "none",
+  "description": "Open plugin manager dialog"
+ },
+ {
+  "action": "plugin_install",
+  "default": "none",
+  "description": "Install plugin"
+ },
+ {
+  "action": "which_key_toggle",
+  "default": "ctrl+alt+k",
+  "description": "Toggle which-key panel"
+ },
+ {
+  "action": "which_key_layout_toggle",
+  "default": "ctrl+alt+shift+k",
+  "description": "Switch which-key layout"
+ },
+ {
+  "action": "which_key_pending_toggle",
+  "default": "ctrl+alt+shift+p",
+  "description": "Toggle which-key pending preview"
+ },
+ {
+  "action": "which_key_group_previous",
+  "default": "ctrl+alt+left,ctrl+alt+[",
+  "description": "Previous which-key group"
+ },
+ {
+  "action": "which_key_group_next",
+  "default": "ctrl+alt+right,ctrl+alt+]",
+  "description": "Next which-key group"
+ },
+ {
+  "action": "which_key_scroll_up",
+  "default": "ctrl+alt+up,ctrl+alt+p",
+  "description": "Scroll which-key up"
+ },
+ {
+  "action": "which_key_scroll_down",
+  "default": "ctrl+alt+down,ctrl+alt+n",
+  "description": "Scroll which-key down"
+ },
+ {
+  "action": "which_key_page_up",
+  "default": "ctrl+alt+pageup",
+  "description": "Page which-key up"
+ },
+ {
+  "action": "which_key_page_down",
+  "default": "ctrl+alt+pagedown",
+  "description": "Page which-key down"
+ },
+ {
+  "action": "which_key_home",
+  "default": "ctrl+alt+home",
+  "description": "Jump to first which-key binding"
+ },
+ {
+  "action": "which_key_end",
+  "default": "ctrl+alt+end",
+  "description": "Jump to last which-key binding"
+ }
+]

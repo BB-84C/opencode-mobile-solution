@@ -8,6 +8,7 @@ import {
   type RequestPolicy,
 } from '@/src/opencode/client';
 import {
+  findContractModel,
   flattenConfiguredModels,
   resolvePromptSelection,
   variantsForModel,
@@ -52,6 +53,9 @@ import {
 } from '@/src/ux/session-interactions';
 import type { QuestionSubmission } from '@/src/ux/question-request';
 import { sortMessagesChronologically } from '@/src/ux/message-order';
+import { toFilePart, unsupportedAttachmentReason, type PromptAttachment } from '@/src/ux/prompt-attachments';
+import { replaceDirectoryRequests } from '@/src/ux/attention';
+import { describeTurnError } from '@/src/ux/turn-error';
 import type { ThinkingLevel } from '@/src/ux/tui-actions';
 import { sessionKey, type SessionRef } from '@/src/ux/session-forest';
 
@@ -146,6 +150,8 @@ export interface MobileStore {
   sessionSelections: Record<string, PromptSelection>;
   sessionLoadStates: Record<string, LoadingState>;
   sessionErrors: Record<string, string | null>;
+  /** Why a session's last turn stopped, from `session.error`. Kept apart from load warnings so a reload cannot wipe it. */
+  sessionFailures: Record<string, SessionFailure | null>;
   activeAgentName: string | null;
   activeAgentByHost: Record<string, string>;
   activeVariant?: string;
@@ -155,6 +161,10 @@ export interface MobileStore {
   diffs: Record<string, FileDiff[]>;
   loading: LoadingState;
   error: string | null;
+  /** Transient keyboard/action feedback. Kept apart from `error`, which screens
+   *  render as a host sync failure. */
+  notice: string | null;
+  commandPaletteOpen: boolean;
   hostSyncStates: Record<string, LoadingState>;
   hostSyncErrors: Record<string, string | null>;
   hostSyncNotes: Record<string, string | null>;
@@ -171,6 +181,10 @@ export interface MobileStore {
   eventSubscriptionDirectories: Partial<Record<string, string | undefined>>;
   eventConnected: Record<string, boolean>;
   eventConnectionStates: Record<string, SessionTransportState>;
+  /** One machine-wide stream per paired machine, keyed by connection and
+   *  target. It keeps permissions and questions current for every session,
+   *  including subagents nobody has open. */
+  attentionUnsubscribers: Partial<Record<string, () => void>>;
   questionRevision: number;
   hydrate(): Promise<void>;
   addConnection(input: Omit<HostConnection, 'id' | 'lastConnected' | 'isReachable'>): Promise<void>;
@@ -179,14 +193,44 @@ export interface MobileStore {
   removeConnection(id: string): Promise<void>;
   setActiveConnection(id: string): boolean;
   clearActiveConnection(): void;
+  /** Removes a session on the machine that owns it. Deliberately not bound to
+   *  any key: a satellite device should not be one keystroke from deleting work. */
+  deleteSession(input: SessionRef | string): Promise<void>;
+  showNotice(message: string): void;
+  dismissNotice(): void;
+  dismissSessionFailure(key: string): void;
+  openCommandPalette(): void;
+  closeCommandPalette(): void;
   refreshActiveHost(options?: { background?: boolean }): Promise<void>;
   subscribeToActiveHost(): void;
   unsubscribeFromHost(connectionId: string): void;
+  startAttentionWatch(): void;
+  stopAttentionWatch(): void;
+  /** Refreshes one host's sessions and machines without touching the screen's
+   *  loading state; concurrent calls share one request. */
+  refreshHostInBackground(connectionId: string): Promise<void>;
+  /** Re-reads pending permissions and questions for a session's directory. */
+  refreshPendingRequests(ref: SessionInput): Promise<void>;
+  /** After the app was in the background: streams may have died silently. */
+  resumeLiveUpdates(): void;
   openSession(ref: SessionInput): Promise<void>;
   loadOlderMessages(ref: SessionInput): Promise<void>;
   searchFileReferences(query: string, ref?: SessionInput): Promise<FileReference[]>;
   startNewSessionPrompt(): void;
-  sendPrompt(text: string): Promise<string | null>;
+  createSession(input: {
+    connectionId: string;
+    relayTargetID?: string;
+    directory?: string;
+    title?: string;
+  }): Promise<SessionRef | null>;
+  /** Fetches a machine's agents and providers without needing a session there,
+   *  so a new-session form has real lists on a fresh install. */
+  loadMachineContract(input: {
+    connectionId: string;
+    relayTargetID?: string;
+    directory?: string;
+  }): Promise<boolean>;
+  sendPrompt(text: string, attachments?: readonly PromptAttachment[]): Promise<string | null>;
   /** Removes legacy records; it never dispatches them. */
   flushQueuedPrompts(connectionId?: string): Promise<void>;
   renameSession(ref: SessionInput, title: string): Promise<void>;
@@ -282,6 +326,7 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
   sessionSelections: {},
   sessionLoadStates: {},
   sessionErrors: {},
+  sessionFailures: {},
   activeAgentName: null,
   activeAgentByHost: {},
   activeVariant: undefined,
@@ -292,6 +337,8 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
   diffs: {},
   loading: 'idle',
   error: null,
+  notice: null,
+  commandPaletteOpen: false,
   hostSyncStates: {},
   hostSyncErrors: {},
   interruptArmedAt: {},
@@ -302,6 +349,7 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
   stashedPrompts: [],
   queuedPrompts: [],
   eventUnsubscribers: {},
+  attentionUnsubscribers: {},
   eventSubscriptionDirectories: {},
   eventConnected: {},
   eventConnectionStates: {},
@@ -475,6 +523,7 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
         sessionSelections: omitCompositeConnection(state.sessionSelections, id),
         sessionLoadStates: omitCompositeConnection(state.sessionLoadStates, id),
         sessionErrors: omitCompositeConnection(state.sessionErrors, id),
+        sessionFailures: omitCompositeConnection(state.sessionFailures, id),
         machineContracts: omitScopeConnection(state.machineContracts, id),
         contractLoadStates: omitScopeConnection(state.contractLoadStates, id),
         agents: omitScopeConnection(state.agents, id),
@@ -512,6 +561,26 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
       error: null,
     });
     return true;
+  },
+
+  showNotice(message) {
+    set({ notice: message });
+  },
+
+  dismissNotice() {
+    set({ notice: null });
+  },
+
+  dismissSessionFailure(key) {
+    set((state) => (state.sessionFailures[key] ? { sessionFailures: { ...state.sessionFailures, [key]: null } } : {}));
+  },
+
+  openCommandPalette() {
+    set({ commandPaletteOpen: true });
+  },
+
+  closeCommandPalette() {
+    set({ commandPaletteOpen: false });
   },
 
   clearActiveConnection() {
@@ -615,6 +684,99 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
       eventConnectionStates: { ...state.eventConnectionStates, ...Object.fromEntries(removedKeys.map((key) => [key, 'idle' as const])) },
     }));
     void flushMobileSessionPersistence().catch(() => undefined);
+  },
+
+  startAttentionWatch() {
+    const state = get();
+    const wanted = new Map<string, { connection: HostConnection; relayTargetID: string }>();
+    for (const connection of state.connections) {
+      const known = state.relayTargets[connection.id];
+      if (!known) {
+        // Events are filed by machine; subscribing before the machines are
+        // known would file them under a key no screen reads. Learn them first;
+        // the caller restarts the watch once they arrive.
+        void get().refreshHostInBackground(connection.id);
+        continue;
+      }
+      const targets = known.map((target) => target.id);
+      for (const relayTargetID of targets.length > 0 ? targets : [DIRECT_RELAY_TARGET_ID]) {
+        wanted.set(JSON.stringify([connection.id, relayTargetID]), { connection, relayTargetID });
+      }
+    }
+    const current = state.attentionUnsubscribers;
+    const stale = Object.keys(current).filter((key) => !wanted.has(key));
+    for (const key of stale) current[key]?.();
+    const started: Record<string, () => void> = {};
+    for (const [key, { connection, relayTargetID }] of wanted) {
+      if (current[key]) continue;
+      const scopeRef = { connectionId: connection.id, relayTargetID, sessionId: '' };
+      const reconcile = () => reconcilePendingRequests(connection, relayTargetID, get, set);
+      started[key] = clientFor(connection, relayTargetID).subscribeEvents(
+        (event) => {
+          if (!ATTENTION_EVENT_TYPES.has(event.type)) return;
+          set((current) => applyServerEvent(current, scopeRef, event));
+          // A request from a session the index has not seen yet (a subagent
+          // that just started) needs its title, and its screen needs it listed.
+          const sessionId = sessionIdFromServerEvent(event);
+          if (event.type.endsWith('.asked') && sessionId && !currentSessionForRef(get(), { ...scopeRef, sessionId })) {
+            void get().refreshHostInBackground(connection.id);
+          }
+        },
+        {
+          scope: 'global',
+          onReconnect: reconcile,
+          onConnectionState: (connectionState) => {
+            if (connectionState === 'live') void reconcile();
+          },
+        },
+      );
+    }
+    set((state) => ({ attentionUnsubscribers: { ...omitKeys(state.attentionUnsubscribers, stale), ...started } }));
+  },
+
+  refreshHostInBackground(connectionId) {
+    const connection = get().connections.find((item) => item.id === connectionId);
+    if (!connection) return Promise.resolve();
+    const existing = hostRefreshFlights.get(connectionId);
+    if (existing) return existing;
+    const flight = refreshHost(connection, { background: true }, get, set).finally(() => {
+      if (hostRefreshFlights.get(connectionId) === flight) hostRefreshFlights.delete(connectionId);
+    });
+    hostRefreshFlights.set(connectionId, flight);
+    return flight;
+  },
+
+  stopAttentionWatch() {
+    for (const unsubscribe of Object.values(get().attentionUnsubscribers)) unsubscribe?.();
+    set({ attentionUnsubscribers: {} });
+  },
+
+  async refreshPendingRequests(input) {
+    let ref: SessionRef;
+    try {
+      ref = resolveSessionInput(input, get());
+    } catch {
+      return;
+    }
+    const connection = connectionForRef(get(), ref);
+    const session = currentSessionForRef(get(), ref);
+    if (!connection || !session) return;
+    await Promise.allSettled([
+      refreshSessionPermissions(ref, connection, get, set),
+      refreshDirectoryQuestions(ref, connection, session, get, set),
+    ]);
+  },
+
+  resumeLiveUpdates() {
+    get().stopAttentionWatch();
+    get().startAttentionWatch();
+    const ref = get().activeSessionRef;
+    if (!ref) return;
+    const unsubscribe = get().eventUnsubscribers[sessionStateKey(ref)];
+    unsubscribe?.();
+    set((state) => ({ eventUnsubscribers: omitKeys(state.eventUnsubscribers, [sessionStateKey(ref)]) }));
+    get().subscribeToActiveHost();
+    void get().refreshPendingRequests(ref);
   },
 
   async openSession(input) {
@@ -754,12 +916,60 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
   },
 
   startNewSessionPrompt() {
-    set({ error: 'OpenCode Mobile controls existing sessions and does not create sessions.' });
+    // Creation itself lives in createSession; this only clears a stale banner so
+    // the screen that offers the choices opens on a clean slate.
+    set({ error: null });
   },
 
-  async sendPrompt(text) {
+  async loadMachineContract({ connectionId, relayTargetID, directory }) {
+    const connection = get().connections.find((item) => item.id === connectionId);
+    if (!connection) return false;
+    const client = clientFor(connection, relayTargetID);
+    const query = directory ? { directory } : {};
+    const [agentsResult, providersResult, configResult, commandsResult] = await Promise.allSettled([
+      client.listAgents(query),
+      client.listConfiguredProviders ? client.listConfiguredProviders(query) : Promise.resolve(undefined),
+      client.getConfig ? client.getConfig(query) : Promise.resolve(undefined),
+      client.listCommands(query),
+    ]);
+    if (agentsResult.status !== 'fulfilled' || providersResult.status !== 'fulfilled') return false;
+
+    const ref: SessionRef = { connectionId, relayTargetID: relayTargetID ?? '', sessionId: '' };
+    const contract = buildMachineContract({
+      ref,
+      session: { id: '', directory } as Session,
+      agents: agentsResult.value,
+      providers: providersResult.value,
+      config: fulfilledOr(configResult, undefined),
+      commands: fulfilledOr(commandsResult, []),
+    });
+    if (!contract) return false;
+
+    const scopeKey = executionScopeKey(ref, directory);
+    set((state) => ({ machineContracts: { ...state.machineContracts, [scopeKey]: contract } }));
+    return true;
+  },
+
+  async createSession({ connectionId, relayTargetID, directory, title }) {
+    const connection = get().connections.find((item) => item.id === connectionId);
+    if (!connection) {
+      set({ error: 'Select a host before creating a session.' });
+      return null;
+    }
+    try {
+      const session = await clientFor(connection, relayTargetID).createSession(title, directory);
+      const ref = sessionRefFor(connectionId, { ...session, relayTargetID });
+      set((state) => applySessionUpdate(state, ref, session));
+      return ref;
+    } catch (error) {
+      set({ error: errorMessage(error) });
+      return null;
+    }
+  },
+
+  async sendPrompt(text, attachments = []) {
     const trimmed = text.trim();
-    if (!trimmed) return null;
+    if (!trimmed && attachments.length === 0) return null;
     const ref = get().activeSessionRef;
     if (!ref) {
       set({ error: 'Select an existing session before sending a message.' });
@@ -787,6 +997,16 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
       set((state) => ({ error: message, sessionErrors: { ...state.sessionErrors, [key]: message } }));
       return null;
     }
+    if (attachments.length > 0) {
+      const model = findContractModel(contract, selection.model);
+      const blocked = get().promptMode === 'shell' || parseSlashCommand(trimmed)
+        ? 'Attachments go with a normal message, not with a shell line or a slash command.'
+        : unsupportedAttachmentReason(attachments, model?.model.capabilities, model?.modelName ?? selection.model.modelID);
+      if (blocked) {
+        set((state) => ({ error: blocked, sessionErrors: { ...state.sessionErrors, [key]: blocked } }));
+        return null;
+      }
+    }
     const dispatch: PromptDispatchOptions = {
       agent: selection.agentName,
       model: selection.model,
@@ -794,14 +1014,16 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
       directory: directoryForSession(session),
     };
     try {
-      await dispatchPrompt(clientFor(connection, ref.relayTargetID), ref.sessionId, trimmed, get().promptMode, dispatch);
+      await dispatchPrompt(clientFor(connection, ref.relayTargetID), ref.sessionId, trimmed, attachments, get().promptMode, dispatch);
+      // The user has moved on from the failure by sending something new.
+      set((state) => (state.sessionFailures[key] ? { sessionFailures: { ...state.sessionFailures, [key]: null } } : {}));
     } catch (error) {
       const message = errorMessage(error);
       set((state) => ({ error: message, sessionErrors: { ...state.sessionErrors, [key]: message } }));
-      get().recordPromptHistory(trimmed);
+      if (trimmed) get().recordPromptHistory(trimmed);
       return null;
     }
-    get().recordPromptHistory(trimmed);
+    if (trimmed) get().recordPromptHistory(trimmed);
     await openSessionInBackground(ref, connection, get, set);
     return ref.sessionId;
   },
@@ -839,8 +1061,35 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
       set({ error: errorMessage(error) });
       return null;
     }
-    set({ error: 'OpenCode Mobile controls existing sessions and does not create or fork sessions.' });
-    return null;
+    const { ref, connection } = requireSessionContext(input, get());
+    try {
+      const forked = await clientFor(connection, ref.relayTargetID).forkSession(ref.sessionId, _messageId);
+      const forkedRef = sessionRefFor(ref.connectionId, { ...forked, relayTargetID: ref.relayTargetID });
+      set((state) => applySessionUpdate(state, forkedRef, forked));
+      return forkedRef.sessionId;
+    } catch (error) {
+      set({ error: errorMessage(error) });
+      return null;
+    }
+  },
+
+  async deleteSession(input) {
+    const { ref, session } = requireSessionContext(input, get());
+    const connection = get().connections.find((item) => item.id === ref.connectionId);
+    if (!connection) throw new Error('That session belongs to a host this device no longer has.');
+    await clientFor(connection, ref.relayTargetID).deleteSession(ref.sessionId, { directory: session.directory });
+    const key = sessionStateKey(ref);
+    set((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ref.connectionId]: (state.sessions[ref.connectionId] ?? []).filter((item) => item.id !== ref.sessionId),
+      },
+      sessionStatuses: omitRecordKey(state.sessionStatuses, key),
+      ...(state.activeSessionKey === key
+        ? { activeSessionRef: null, activeSessionKey: null, activeSessionId: null }
+        : {}),
+    }));
+    set((state) => ({ projects: { ...state.projects, [ref.connectionId]: groupSessionsByDirectory(state.sessions[ref.connectionId] ?? []) } }));
   },
 
   async compactSession(input) {
@@ -877,8 +1126,9 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
       workspaceQueryForSession(session),
     );
     const key = sessionStateKey(ref);
+    // The request may be filed under a subagent's session rather than this one.
     set((state) => ({
-      permissions: { ...state.permissions, [key]: (state.permissions[key] ?? []).filter((request) => request.id !== permissionId) },
+      permissions: withoutRequest(state.permissions, permissionId),
       permissionErrors: { ...state.permissionErrors, [key]: null },
     }));
   },
@@ -888,9 +1138,8 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
     const requestID = 'requestID' in payload ? payload.requestID : payload.questionID;
     const body = 'requestID' in payload ? { answers: payload.answers } : createQuestionReplyBody(payload);
     await clientFor(connection, ref.relayTargetID).respondToQuestion(requestID, body, workspaceQueryForSession(session));
-    const key = sessionStateKey(ref);
     set((state) => ({
-      questions: { ...state.questions, [key]: (state.questions[key] ?? []).filter((request) => request.id !== requestID) },
+      questions: withoutRequest(state.questions, requestID),
       questionRevision: state.questionRevision + 1,
     }));
   },
@@ -898,9 +1147,8 @@ export const useOpenCodeMobileStore = create<MobileStore>((set, get) => ({
   async rejectQuestion(input, requestId) {
     const { ref, connection, session } = requireSessionContext(input, get());
     await clientFor(connection, ref.relayTargetID).rejectQuestion(requestId, workspaceQueryForSession(session));
-    const key = sessionStateKey(ref);
     set((state) => ({
-      questions: { ...state.questions, [key]: (state.questions[key] ?? []).filter((request) => request.id !== requestId) },
+      questions: withoutRequest(state.questions, requestId),
       questionRevision: state.questionRevision + 1,
     }));
   },
@@ -1646,6 +1894,7 @@ function dispatchPrompt(
   client: OpenCodeClient,
   sessionId: string,
   text: string,
+  attachments: readonly PromptAttachment[],
   promptMode: PromptMode,
   dispatch: PromptDispatchOptions,
 ) {
@@ -1660,7 +1909,11 @@ function dispatchPrompt(
   if (slash) {
     return client.sendCommand(sessionId, slash.command, slash.args, dispatch);
   }
-  return client.sendAsync(sessionId, [{ type: 'text', text }], dispatch);
+  const parts: MessagePart[] = [
+    ...(text ? [{ type: 'text' as const, text }] : []),
+    ...attachments.map(toFilePart),
+  ];
+  return client.sendAsync(sessionId, parts, dispatch);
 }
 
 function clientFor(connection: HostConnection, relayTargetID?: string) {
@@ -1780,6 +2033,34 @@ function applySessionUpdate(state: MobileStore, ref: SessionRef, session: Sessio
   };
 }
 
+/**
+ * Pulls a readable sentence out of an error event.
+ *
+ * The server reports a failed turn as an event, not as a failed request, so a
+ * model that cannot run produced no message, no status change the app noticed,
+ * and nothing on screen. Its shape is `{ name, data: { message } }`, but an
+ * unrecognised one must still say something rather than fall back to silence.
+ */
+export interface SessionFailure {
+  id: string;
+  title: string;
+  message: string;
+  at: number;
+}
+
+export function serverEventErrorText(properties: Record<string, unknown>): string {
+  const candidates = [properties.error, properties.data, properties];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const record = candidate as Record<string, unknown>;
+    const data = record.data && typeof record.data === 'object' ? record.data as Record<string, unknown> : undefined;
+    const message = [data?.message, record.message, record.name]
+      .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    if (message) return message;
+  }
+  return 'The machine reported an error with no description.';
+}
+
 function applyServerEvent(state: MobileStore, scopeRef: SessionRef, event: ServerEvent): Partial<MobileStore> {
   const properties = recordValue(event.properties);
   if (!properties) return {};
@@ -1787,6 +2068,15 @@ function applyServerEvent(state: MobileStore, scopeRef: SessionRef, event: Serve
   const ref = sessionId ? { ...scopeRef, sessionId } : scopeRef;
   const key = sessionStateKey(ref);
 
+  if (event.type === 'session.error' || event.type === 'message.error') {
+    // Leave the session marked busy and the spinner never stops.
+    const idle = { sessionStatuses: { ...state.sessionStatuses, [key]: { type: 'idle' as const } } };
+    const described = describeTurnError(properties.error) ?? { aborted: false, title: 'Error', message: serverEventErrorText(properties) };
+    // Stop is the user's own doing; the TUI does not report it either.
+    if (described.aborted) return idle;
+    const failure: SessionFailure = { id: typeof event.id === "string" ? event.id : `${key}:${Date.now()}`, title: described.title, message: described.message, at: Date.now() };
+    return { ...idle, sessionFailures: { ...state.sessionFailures, [key]: failure } };
+  }
   if (event.type === 'permission.asked') {
     const request = properties as unknown as PermissionRequest;
     if (!request.id || !request.sessionID || !request.permission || !Array.isArray(request.patterns)) return {};
@@ -1847,7 +2137,13 @@ function applyServerEvent(state: MobileStore, scopeRef: SessionRef, event: Serve
   }
   if (event.type === 'session.status') {
     const status = recordValue(properties.status) as SessionStatus | undefined;
-    return status ? { sessionStatuses: { ...state.sessionStatuses, [key]: status } } : {};
+    if (!status) return {};
+    // A new turn has started, so the last one's failure is history.
+    const startedAgain = 'type' in status && status.type === 'busy' && state.sessionFailures[key];
+    return {
+      sessionStatuses: { ...state.sessionStatuses, [key]: status },
+      ...(startedAgain ? { sessionFailures: { ...state.sessionFailures, [key]: null } } : {}),
+    };
   }
   if (event.type === 'session.diff') {
     return Array.isArray(properties.diff) ? { diffs: { ...state.diffs, [key]: properties.diff as FileDiff[] } } : {};
@@ -1968,8 +2264,15 @@ async function refreshSessionPermissions(ref: SessionRef, connection: HostConnec
   try {
     const requests = await clientFor(connection, ref.relayTargetID).listPermissions(workspaceQueryForSession(session));
     if (!current()) return;
+    // The list covers the whole directory, subagent sessions included. Keeping
+    // only the open session's entries is what hid a child's request from view.
     set((state) => state.permissions[key] === previous ? {
-      permissions: { ...state.permissions, [key]: requests.filter((request) => request.sessionID === ref.sessionId) },
+      permissions: replaceDirectoryRequests(
+        state.permissions,
+        { connectionId: ref.connectionId, relayTargetID: ref.relayTargetID },
+        sessionIdsInDirectory(state, ref, directoryForSession(session)),
+        requests,
+      ),
       permissionErrors: { ...state.permissionErrors, [key]: null },
     } : {});
   } catch (error) {
@@ -1978,6 +2281,80 @@ async function refreshSessionPermissions(ref: SessionRef, connection: HostConnec
       permissionErrors: { ...state.permissionErrors, [key]: `Could not check pending permissions: ${errorMessage(error)}` },
     } : {});
   }
+}
+
+/** A request may be filed under a subagent's session rather than the open one. */
+function withoutRequest<T extends { id: string }>(record: Record<string, T[]>, requestId: string) {
+  return Object.fromEntries(Object.entries(record).map(([key, requests]) => [key, requests.filter((request) => request.id !== requestId)]));
+}
+
+const ATTENTION_EVENT_TYPES = new Set([
+  // A turn that fails in a session nobody has open (often a subagent) is why
+  // work stops; the watch has to see it, and the status that clears it.
+  'session.error',
+  'session.status',
+  'permission.asked',
+  'permission.replied',
+  'question.asked',
+  'question.replied',
+  'question.rejected',
+]);
+
+// How many recently active directories a fresh machine-wide stream re-reads.
+// The stream only carries what happens after it opens, so anything already
+// pending has to be fetched; the long tail of old directories is not worth it.
+const RECONCILE_DIRECTORY_LIMIT = 12;
+
+function sessionIdsInDirectory(state: Pick<MobileStore, 'sessions'>, scope: { connectionId: string; relayTargetID: string }, directory: string | undefined) {
+  return (state.sessions[scope.connectionId] ?? [])
+    .filter((session) => (session.relayTargetID ?? DIRECT_RELAY_TARGET_ID) === scope.relayTargetID && directoryForSession(session) === directory)
+    .map((session) => session.id);
+}
+
+async function refreshDirectoryQuestions(ref: SessionRef, connection: HostConnection, session: Session, get: StoreGet, set: StoreSet) {
+  const revision = get().questionRevision;
+  const questions = await clientFor(connection, ref.relayTargetID).listQuestions(workspaceQueryForSession(session));
+  set((state) => state.questionRevision === revision ? {
+    questions: replaceDirectoryRequests(
+      state.questions,
+      { connectionId: ref.connectionId, relayTargetID: ref.relayTargetID },
+      sessionIdsInDirectory(state, ref, directoryForSession(session)),
+      questions,
+    ),
+  } : {});
+}
+
+async function reconcilePendingRequests(connection: HostConnection, relayTargetID: string, get: StoreGet, set: StoreSet) {
+  const scope = { connectionId: connection.id, relayTargetID };
+  const sessions = (get().sessions[connection.id] ?? [])
+    .filter((session) => (session.relayTargetID ?? DIRECT_RELAY_TARGET_ID) === relayTargetID)
+    .sort(compareSessionsByRecency);
+  const seen = new Set<string>();
+  const representatives: Session[] = [];
+  for (const session of sessions) {
+    const directory = directoryForSession(session);
+    if (!directory || seen.has(directory)) continue;
+    seen.add(directory);
+    representatives.push(session);
+    if (representatives.length >= RECONCILE_DIRECTORY_LIMIT) break;
+  }
+  const client = clientFor(connection, relayTargetID);
+  await Promise.allSettled(representatives.map(async (session) => {
+    const query = workspaceQueryForSession(session);
+    const revision = get().questionRevision;
+    const [permissions, questions] = await Promise.allSettled([client.listPermissions(query), client.listQuestions(query)]);
+    set((state) => {
+      const ids = sessionIdsInDirectory(state, scope, directoryForSession(session));
+      return {
+        ...(permissions.status === 'fulfilled'
+          ? { permissions: replaceDirectoryRequests(state.permissions, scope, ids, permissions.value) }
+          : {}),
+        ...(questions.status === 'fulfilled' && state.questionRevision === revision
+          ? { questions: replaceDirectoryRequests(state.questions, scope, ids, questions.value) }
+          : {}),
+      };
+    });
+  }));
 }
 
 function mergeQuestionsForTarget(
@@ -2163,8 +2540,19 @@ function sessionIdFromServerEvent(event: ServerEvent) {
     ?? (event.type.startsWith('session.') ? stringValue(info?.id) : undefined);
 }
 
+// The relay answers a rejected path with a bare token. Shown as-is it reads as
+// a demand for a directory rather than as "that path is not one".
+const RELAY_ERROR_TEXT: Record<string, string> = {
+  directory_forbidden: 'That working directory is not usable on this machine. Pick one of the offered directories, or leave it empty to use the machine default. Paths must be absolute, and "~" is not expanded.',
+  target_forbidden: 'This device is not authorized for that machine.',
+};
+
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
+  const raw = error instanceof Error ? error.message : String(error);
+  for (const [token, text] of Object.entries(RELAY_ERROR_TEXT)) {
+    if (raw.includes(token)) return text;
+  }
+  return raw;
 }
 
 function summarizeSyncIssues(issues: string[]) {

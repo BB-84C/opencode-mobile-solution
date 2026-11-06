@@ -240,6 +240,35 @@ test('proxies authenticated OpenCode health and config', async (t) => {
   assert.deepEqual(JSON.parse(config.body), { directory: '/vault/workspace' });
 });
 
+test('lets a browser-origin client read a proxied response, not just survive the preflight', async (t) => {
+  const upstream = await createFakeUpstream({ config: { directory: '/vault/workspace' } });
+  const relay = await withRelay(t, { upstream, tokens: { device: tokenEntry() } });
+
+  const preflight = await request({
+    port: relay.port,
+    method: 'OPTIONS',
+    pathname: '/config',
+    headers: {
+      origin: 'cockpit://app',
+      'access-control-request-method': 'GET',
+      'access-control-request-headers': 'authorization',
+    },
+  });
+  const proxied = await request({
+    port: relay.port,
+    pathname: '/config',
+    headers: { ...bearer(), origin: 'cockpit://app' },
+  });
+
+  // The relay answers its own preflight, but the upstream response used to be
+  // forwarded verbatim. A renderer loading from its own scheme would clear the
+  // preflight and then be unable to read the body, which looks like a hang
+  // rather than a policy error.
+  assert.equal(preflight.headers['access-control-allow-origin'], '*');
+  assert.equal(proxied.headers['access-control-allow-origin'], '*');
+  assert.deepEqual(JSON.parse(proxied.body), { directory: '/vault/workspace' });
+});
+
 test('registers SSE subscribers before server.connected and pipes legacy events byte-compatibly', async (t) => {
   const upstream = await createFakeUpstream();
   const relay = await withRelay(t, { upstream, tokens: { device: tokenEntry() } });

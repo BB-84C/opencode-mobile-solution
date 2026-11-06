@@ -1,5 +1,5 @@
-import { memo, useCallback, useRef, useState, type MutableRefObject } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { memo, useCallback, useContext, useRef, useState, type MutableRefObject } from 'react';
+import { Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import type { MessagePart, MessageWithParts, SessionStatus, ToolPart } from '@/src/opencode/types';
 import { getMessageActions } from '@/src/ux/tui-actions';
@@ -7,6 +7,8 @@ import { partToText } from '@/src/store/mobile-store';
 import { palette } from '@/src/ui/palette';
 import { writeClipboardText } from '@/src/ux/clipboard';
 import { createSubagentCardModel } from '@/src/ux/subagent-card';
+import { conversationHtml, conversationText } from '@/src/ux/conversation-text';
+import { describeTurnError } from '@/src/ux/turn-error';
 import {
   collapseToolOutput,
   createToolTranscriptModel,
@@ -28,6 +30,10 @@ import {
 import { ActionModal } from './ActionModal';
 import { TextViewModal } from './TextViewModal';
 import { MarkdownText } from './MarkdownText';
+import { SelectableText } from './SelectableText';
+import { TranscriptContext } from './transcript-context';
+import { TurnErrorBox } from './TurnErrorBox';
+import { containsMath } from './math-html';
 
 const shellOutputMaxLines = 10;
 const defaultShellContentColumns = 40;
@@ -159,13 +165,28 @@ function MessageCardBody({
     [callbacksRef],
   );
   const [actionsVisible, setActionsVisible] = useState(false);
-  const [messageTextViewVisible, setMessageTextViewVisible] = useState(false);
+  const [messageTextView, setMessageTextView] = useState<{ title: string; text: string; focusOffset: number; html?: string } | null>(null);
+  const getTranscript = useContext(TranscriptContext);
   const [messageActionError, setMessageActionError] = useState<string | null>(null);
   const role = message.info.role;
   const rawText = message.parts.map(partToText).join('\n');
-  const messageTextView = createTextViewModel({ title: role === 'user' ? 'User message' : 'Message', text: rawText });
+  // The whole conversation, opened at this message: a phone cannot drag a
+  // selection across cards, so this is where a selection spans messages.
+  const openMessageTextView = () => {
+    const transcript = getTranscript?.() ?? [];
+    if (transcript.some((item) => item.info.id === message.info.id)) {
+      const conversation = conversationText(transcript, message.info.id);
+      // Formulas can only be typeset on iOS inside a WebView, so the sheet gets
+      // an HTML version too when there is math to show.
+      const html = Platform.OS === 'ios' && containsMath(conversation.text) ? conversationHtml(transcript, message.info.id) : undefined;
+      setMessageTextView({ title: 'Conversation', text: conversation.text, focusOffset: conversation.focusOffset, html });
+      return;
+    }
+    const own = createTextViewModel({ title: role === 'user' ? 'User message' : 'Message', text: rawText });
+    setMessageTextView({ title: own.title, text: own.text, focusOffset: 0 });
+  };
   const transcriptRole = role === 'user' ? 'user' : 'assistant';
-  const hasNestedControls = message.parts.some((part) => partHasNestedControls(part, renderQuestionsInline));
+  const turnError = role === 'assistant' ? describeTurnError(message.info.error) : null;
   const content = (
     <>
       <Text selectable style={styles.meta}>
@@ -195,6 +216,7 @@ function MessageCardBody({
           renderQuestionsInline={renderQuestionsInline}
         />
       ))}
+      {turnError ? <TurnErrorBox testID={`message-turn-error-${message.info.id}`} error={turnError} /> : null}
       {showActions ? (
         <>
           <ActionModal
@@ -215,7 +237,7 @@ function MessageCardBody({
               onPress: async () => {
                 setMessageActionError(null);
                 if (action.id.startsWith('copy')) await writeClipboardText(rawText);
-                if (action.id === 'open-text-view') setMessageTextViewVisible(true);
+                if (action.id === 'open-text-view') openMessageTextView();
                 if ((action.id === 'revert' || (allowFork && action.id === 'fork')) && role === 'user') {
                   await invokeUserMessageAction(action.id, message.info.id);
                 }
@@ -229,54 +251,40 @@ function MessageCardBody({
             </Text>
           ) : null}
           <TextViewModal
-            title={messageTextView.title}
-            text={messageTextView.text}
-            visible={messageTextViewVisible}
-            onClose={() => setMessageTextViewVisible(false)}
+            title={messageTextView?.title ?? ''}
+            text={messageTextView?.text ?? ''}
+            prose
+            focusOffset={messageTextView?.focusOffset ?? 0}
+            html={messageTextView?.html}
+            visible={messageTextView !== null}
+            onClose={() => setMessageTextView(null)}
           />
         </>
       ) : null}
     </>
   );
 
-  if (hasNestedControls) {
-    return (
-      <View
-        testID={`message-card-${message.info.id}`}
-        style={[styles.card, role === 'user' ? styles.userCard : styles.agentCard, selected && styles.selectedCard]}>
-        {content}
-        {showActions ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Message actions"
-            testID={`message-actions-${message.info.id}`}
-            style={styles.messageActionsButton}
-            onPress={() => setActionsVisible(true)}>
-            <Text style={styles.messageActionsText}>...</Text>
-          </Pressable>
-        ) : null}
-      </View>
-    );
-  }
-
+  // One shape for every card: a plain container with the actions button. A
+  // card that answered long-press itself took the gesture iOS uses to start a
+  // text selection, and a card that answered a click opened its menu whenever
+  // the user clicked text on the desktop.
   return (
-    <Pressable
-      accessibilityRole="button"
+    <View
       testID={`message-card-${message.info.id}`}
-      style={[styles.card, role === 'user' ? styles.userCard : styles.agentCard, selected && styles.selectedCard]}
-      onLongPress={() => setActionsVisible(true)}
-      onPress={() => {
-        if (showActions) setActionsVisible(true);
-      }}>
+      style={[styles.card, role === 'user' ? styles.userCard : styles.agentCard, selected && styles.selectedCard]}>
       {content}
-    </Pressable>
+      {showActions ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Message actions"
+          testID={`message-actions-${message.info.id}`}
+          style={styles.messageActionsButton}
+          onPress={() => setActionsVisible(true)}>
+          <Text style={styles.messageActionsText}>...</Text>
+        </Pressable>
+      ) : null}
+    </View>
   );
-}
-
-function partHasNestedControls(part: MessagePart, renderQuestionsInline: boolean) {
-  if (getQuestionPromptModel(part)) return renderQuestionsInline;
-  if (getPendingPermissions([{ info: { id: 'part', role: 'assistant' }, parts: [part] }]).length > 0) return true;
-  return part.type === 'tool' || part.type === 'tool_use' || part.type === 'tool_result';
 }
 
 const PartView = memo(function PartView({
@@ -315,9 +323,9 @@ const PartView = memo(function PartView({
           {permission.title}
         </Text>
         {permission.detail ? (
-          <Text selectable style={styles.mono}>
+          <SelectableText style={styles.mono}>
             {permission.detail}
-          </Text>
+          </SelectableText>
         ) : null}
         <View style={styles.permissionActions}>
           {getPermissionActions().map((action) => (
@@ -437,9 +445,9 @@ const PartView = memo(function PartView({
               setShellContentColumns((current) => current === columns ? current : columns);
             }}>
             {toolModel.shell.command ? (
-              <Text selectable testID={`tool-command-${messageId}-${partIndex}`} style={styles.mono}>
+              <SelectableText testID={`tool-command-${messageId}-${partIndex}`} style={styles.mono}>
                 {`$ ${toolModel.shell.command}`}
-              </Text>
+              </SelectableText>
             ) : null}
             {toolModel.shell.output ? (
               <Pressable
@@ -450,9 +458,9 @@ const PartView = memo(function PartView({
                 disabled={!collapsedShellOutput?.overflow}
                 testID={`tool-output-toggle-${messageId}-${partIndex}`}
                 onPress={() => setShellOutputExpanded((expanded) => !expanded)}>
-                <Text selectable testID={`tool-output-${messageId}-${partIndex}`} style={styles.mono}>
+                <SelectableText testID={`tool-output-${messageId}-${partIndex}`} style={styles.mono}>
                   {shellOutput}
-                </Text>
+                </SelectableText>
                 {collapsedShellOutput?.overflow ? (
                   <Text testID={`tool-output-toggle-label-${messageId}-${partIndex}`} style={styles.toolExpandLabel}>
                     {shellOutputExpanded ? 'Click to collapse' : 'Click to expand'}
@@ -460,15 +468,15 @@ const PartView = memo(function PartView({
                 ) : null}
               </Pressable>
             ) : !toolModel.shell.command ? (
-              <Text selectable testID={`tool-output-${messageId}-${partIndex}`} style={styles.mono}>
+              <SelectableText testID={`tool-output-${messageId}-${partIndex}`} style={styles.mono}>
                 {readableText}
-              </Text>
+              </SelectableText>
             ) : null}
           </View>
         ) : (
-          <Text selectable testID={`tool-output-${messageId}-${partIndex}`} style={styles.mono}>
+          <SelectableText testID={`tool-output-${messageId}-${partIndex}`} style={styles.mono}>
             {readableText}
-          </Text>
+          </SelectableText>
         )}
         {showActions ? (
           <View style={styles.toolCopyControls}>
@@ -510,7 +518,7 @@ const PartView = memo(function PartView({
                 event?.stopPropagation?.();
                 setTextViewVisible(true);
               }}>
-              <Text style={styles.toolCopyButtonText}>Open text view</Text>
+              <Text style={styles.toolCopyButtonText}>Select text</Text>
             </Pressable>
           </View>
         ) : null}
@@ -559,8 +567,17 @@ const PartView = memo(function PartView({
 
   if (part.type === 'error') {
     return (
-      <Text selectable testID={`message-raw-${messageId}-${partIndex}`} style={styles.errorText}>
+      <SelectableText testID={`message-raw-${messageId}-${partIndex}`} style={styles.errorText}>
         {stringValue((part as Record<string, unknown>).message) ?? 'OpenCode error'}
+      </SelectableText>
+    );
+  }
+
+  if (part.type === 'file') {
+    const record = part as Record<string, unknown>;
+    return (
+      <Text selectable testID={`message-file-${messageId}-${partIndex}`} style={styles.fileLabel}>
+        {`📎 ${stringValue(record.filename) ?? stringValue(record.mime) ?? 'Attachment'}`}
       </Text>
     );
   }
@@ -663,9 +680,9 @@ export function QuestionPromptCard({
         </Text>
       ) : null}
       {submittedPayload ? (
-        <Text selectable testID={`question-payload-${question.id}`} style={styles.mono}>
+        <SelectableText testID={`question-payload-${question.id}`} style={styles.mono}>
           {submittedPayload}
-        </Text>
+        </SelectableText>
       ) : null}
     </View>
   );
@@ -687,6 +704,16 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     paddingHorizontal: 10,
     paddingVertical: 6,
+  },
+  fileLabel: {
+    alignSelf: 'flex-start',
+    marginTop: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 5,
+    fontSize: 11,
+    color: palette.textMuted,
+    backgroundColor: palette.backgroundElement,
   },
   compaction: {
     paddingVertical: 6,

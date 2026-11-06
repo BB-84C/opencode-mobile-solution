@@ -17,7 +17,7 @@ export function PermissionRequestCard({ request, onReply }: {
 
   return (
     <View testID={`permission-request-${request.id}`} style={styles.card}>
-      <Text style={styles.title}>Permission required · {request.permission}</Text>
+      <Text selectable style={styles.title}>Permission required · {request.permission}</Text>
       {command ? <Text selectable style={styles.command}>{command}</Text> : null}
       <Text selectable style={styles.detail}>{request.patterns.join('\n')}</Text>
       {request.always?.length ? (

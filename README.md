@@ -14,8 +14,8 @@ service: you run every part yourself and hold every credential.
 
 | Part | What it is | Version |
 |------|------------|---------|
-| **`app/`** — OpenCode Mobile | The Expo / React Native client. It builds the iPhone app, and the same code is exported as the web bundle the desktop client loads. | 2.0.0 |
-| **`desktop/`** — OpenCode Cockpit | An Electron shell around that bundle for macOS and Windows: the TUI's keybindings, tray residency, start at login, system notifications. | 2.0.0 |
+| **`app/`** — OpenCode Mobile | The Expo / React Native client. It builds the iPhone app, and the same code is exported as the web bundle the desktop client loads. | 2.0.1 |
+| **`desktop/`** — OpenCode Cockpit | An Electron shell around that bundle for macOS and Windows: the TUI's keybindings, tray residency, start at login, system notifications. | 2.0.1 |
 | **`relay/`** | A small Node service bound to loopback. It turns each device's bearer token into the backend's Basic auth, routes between several backends, enforces per-device directory scope, and hosts a passkey-protected dashboard for pairing phones and authorizing machines. | — |
 | **`clients/`** | VPS route: local launchers for Windows and macOS that attach `opencode` on a workstation to the shared, relay-connected backend. Also notes for client machines that run a third-party VPN beside Tailscale. | — |
 | **`host/`** | Tailnet route: one-command deployment of backends and relay on an always-on Mac, plus `renew-ios-app.sh` for re-signing the iPhone app. | — |
@@ -116,10 +116,10 @@ from source.
 
 | Component | State |
 |-----------|-------|
-| iPhone app | 2.0.0. 517 unit tests pass. Verified by hand on an iPhone 16 running iOS 27: install, launch, connecting through a relay, partial text selection, typeset math. Builds with Xcode 27.1 (Expo 57.0.31). |
+| iPhone app | 2.0.1. 518 unit tests pass. Verified by hand on an iPhone 16 running iOS 27: install, launch, connecting through a relay, partial text selection, typeset math. Builds with Xcode 27.1 (Expo 57.0.31). |
 | Android | The Expo project declares Android, but the iOS-specific pieces added in 1.2/2.0 (native text selection, WebView math) fall back there to plain selectable text and TeX source, and no Android build has been tested. |
-| Desktop, macOS | 2.0.0, 44 tests pass. Used daily; packaging, tray, start at login, the todo board and error boxes verified on a real machine. Notification banners were not seen during testing because Do Not Disturb was on. |
-| Desktop, Windows | 2.0.0, cross-built from macOS. The first version ran on Windows; notifications and the 2.0 features have not yet been confirmed on a real Windows machine. |
+| Desktop, macOS | 2.0.1, 44 tests pass. Used daily; packaging, tray, start at login, the todo board and error boxes verified on a real machine. Notification banners were not seen during testing because Do Not Disturb was on. |
+| Desktop, Windows | 2.0.1, cross-built from macOS. The first version ran on Windows; notifications and the 2.0 features have not yet been confirmed on a real Windows machine. |
 | Relay | 59 tests pass: the original suite plus the CORS and stream-teardown fixes. Supports both routes. |
 | Tailnet host | macOS only. A Windows host (via WSL) is not implemented. |
 | VPS launchers (`clients/windows`, `clients/macos`) | Unchanged from the original release. macOS tests: 6 of 7 pass; the seventh fails the same way on the original code, because it compares `/var/...` with the same path resolved as `/private/var/...`. The Windows Node contract test passes; the PowerShell tests were not run. |
@@ -128,6 +128,8 @@ History of the iOS 27 launch-crash work, the TestFlight releases and the
 investigations behind several fixes is in [`docs/`](docs). What the cockpit line
 added to the app is listed in
 [`docs/differences-from-upstream.md`](docs/differences-from-upstream.md).
+
+Paired phones keep the target scope they were paired with: a backend added to the host later does not appear on an already-paired phone until its device record is widened (or it pairs again). Static tokens in `tokens.json` follow the file.
 
 ### Security notes
 
@@ -173,8 +175,8 @@ MIT — see [LICENSE](LICENSE).
 
 | 部分 | 是什么 | 版本 |
 |------|--------|------|
-| **`app/`**：OpenCode Mobile | Expo / React Native 客户端。编译成 iPhone 应用；同一份代码导出成网页，供桌面客户端加载。 | 2.0.0 |
-| **`desktop/`**：OpenCode Cockpit | 包住这份网页的 Electron 壳，支持 macOS 和 Windows：和 TUI 一致的键位、常驻托盘、开机自启、系统通知。 | 2.0.0 |
+| **`app/`**：OpenCode Mobile | Expo / React Native 客户端。编译成 iPhone 应用；同一份代码导出成网页，供桌面客户端加载。 | 2.0.1 |
+| **`desktop/`**：OpenCode Cockpit | 包住这份网页的 Electron 壳，支持 macOS 和 Windows：和 TUI 一致的键位、常驻托盘、开机自启、系统通知。 | 2.0.1 |
 | **`relay/`** | 只监听本机回环地址的小型 Node 服务。把每台设备的 Bearer 令牌换成后端的 Basic 认证，在多个后端之间分流，按设备限制可访问的目录，并提供用通行密钥（passkey）保护的控制台，用来配对手机和授权机器。 | — |
 | **`clients/`** | VPS 路线：Windows 和 macOS 上的本机启动器，让工作站上的 `opencode` 挂到经中继连通的共享后端。另有一份说明，讲分机同时开着其他 VPN 时怎么连上 Tailscale。 | — |
 | **`host/`** | Tailnet 路线：在一台常开的 Mac 上一条命令部署后端和中继；另有 `renew-ios-app.sh` 用于给 iPhone 应用续签。 | — |
@@ -217,15 +219,17 @@ MIT — see [LICENSE](LICENSE).
 
 | 部分 | 状态 |
 |------|------|
-| iPhone 应用 | 2.0.0，517 个单元测试通过。已在 iOS 27 的 iPhone 16 上手动验证：安装、启动、经中继连接、局部选中复制、公式排版。可用 Xcode 27.1 编译（Expo 57.0.31）。 |
+| iPhone 应用 | 2.0.1，518 个单元测试通过。已在 iOS 27 的 iPhone 16 上手动验证：安装、启动、经中继连接、局部选中复制、公式排版。可用 Xcode 27.1 编译（Expo 57.0.31）。 |
 | Android | Expo 工程里声明了 Android，但 1.2 / 2.0 新增的 iOS 专属部分（原生选字、WebView 公式）在 Android 上会退回普通的可选文字和 TeX 源码，而且还没有测过任何 Android 构建。 |
-| 桌面端 macOS | 2.0.0，44 个测试通过。日常在用；打包、托盘、开机自启、todo 看板、红色报错框都在真机上验证过。测试时开着勿扰模式，没看到系统通知横幅弹出。 |
-| 桌面端 Windows | 2.0.0，在 macOS 上交叉编译。第一版在 Windows 上跑过；通知和 2.0 的新功能还没在真实 Windows 机器上确认。 |
+| 桌面端 macOS | 2.0.1，44 个测试通过。日常在用；打包、托盘、开机自启、todo 看板、红色报错框都在真机上验证过。测试时开着勿扰模式，没看到系统通知横幅弹出。 |
+| 桌面端 Windows | 2.0.1，在 macOS 上交叉编译。第一版在 Windows 上跑过；通知和 2.0 的新功能还没在真实 Windows 机器上确认。 |
 | 中继 | 59 个测试通过：原有测试，加上 CORS 和流中断这几项修复的测试。两条路线都支持。 |
 | Tailnet 主机 | 只支持 macOS。Windows 主机（经 WSL）还没有实现。 |
 | VPS 启动器（`clients/windows`、`clients/macos`） | 与原版相同。macOS 测试 7 个通过 6 个；剩下那个在原版代码上同样失败，原因是测试把 `/var/...` 和它解析后的 `/private/var/...` 当成了不同路径。Windows 的 Node 契约测试通过；PowerShell 测试没有运行。 |
 
 iOS 27 启动闪退的排查、TestFlight 发布记录，以及几项修复背后的调查，都在 [`docs/`](docs) 里。cockpit 线给 App 加了哪些东西，见 [`docs/differences-from-upstream.md`](docs/differences-from-upstream.md)。
+
+已扫码配对的手机会保留配对时的档位范围：总机后来新加的后端，不会自动出现在已配对的手机上，需要扩大这台设备的记录范围（或重新扫码配对）。`tokens.json` 里的静态令牌则随文件即时更新。
 
 ### 安全须知
 

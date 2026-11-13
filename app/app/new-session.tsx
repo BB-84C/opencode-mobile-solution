@@ -101,7 +101,9 @@ export default function NewSessionScreen() {
 
   return (
     <SafeAreaView style={styles.screen}>
-      <ScrollView contentContainerStyle={styles.content}>
+      {/* Same as the Hosts screen: the keyboard must not cover the directory field,
+          and a tap on Create must not be spent dismissing the keyboard. */}
+      <ScrollView contentContainerStyle={styles.content} automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled">
         <View style={styles.titleRow}>
           <Pressable
             accessibilityRole="button"

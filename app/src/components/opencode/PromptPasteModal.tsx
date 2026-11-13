@@ -1,6 +1,8 @@
-import { Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { palette } from '@/src/ui/palette';
+
+import { SheetModal } from './SheetModal';
 
 export function PromptPasteModal({
   visible,
@@ -16,60 +18,36 @@ export function PromptPasteModal({
   onClose(): void;
 }) {
   return (
-    <Modal
-      animationType="slide"
-      transparent
-      presentationStyle="overFullScreen"
-      supportedOrientations={['portrait', 'portrait-upside-down', 'landscape', 'landscape-left', 'landscape-right']}
-      visible={visible}
-      onRequestClose={onClose}>
-      <Pressable testID="manual-paste-scrim" style={styles.scrim} onPress={onClose}>
-        <Pressable testID="manual-paste-sheet" style={styles.sheet} onPress={(event) => event.stopPropagation()}>
-          <View style={styles.handle} />
-          <Text style={styles.title}>Paste text</Text>
-          <TextInput
-            value={value}
-            onChangeText={onChangeText}
-            multiline
-            autoFocus
-            testID="manual-paste-input"
-            placeholder="Paste text here"
-            style={styles.input}
-          />
-          <View style={styles.actions}>
-            <Pressable accessibilityRole="button" testID="manual-paste-cancel" style={styles.secondaryButton} onPress={onClose}>
-              <Text style={styles.secondaryText}>Cancel</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              testID="manual-paste-insert"
-              disabled={!value.trim()}
-              style={[styles.primaryButton, !value.trim() && styles.disabledButton]}
-              onPress={onInsert}>
-              <Text style={styles.primaryText}>Insert</Text>
-            </Pressable>
-          </View>
+    <SheetModal testID="manual-paste-sheet" visible={visible} onClose={onClose}>
+      <View style={styles.handle} />
+      <Text style={styles.title}>Paste text</Text>
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        multiline
+        autoFocus
+        testID="manual-paste-input"
+        placeholder="Paste text here"
+        style={styles.input}
+      />
+      <View style={styles.actions}>
+        <Pressable accessibilityRole="button" testID="manual-paste-cancel" style={styles.secondaryButton} onPress={onClose}>
+          <Text style={styles.secondaryText}>Cancel</Text>
         </Pressable>
-      </Pressable>
-    </Modal>
+        <Pressable
+          accessibilityRole="button"
+          testID="manual-paste-insert"
+          disabled={!value.trim()}
+          style={[styles.primaryButton, !value.trim() && styles.disabledButton]}
+          onPress={onInsert}>
+          <Text style={styles.primaryText}>Insert</Text>
+        </Pressable>
+      </View>
+    </SheetModal>
   );
 }
 
 const styles = StyleSheet.create({
-  scrim: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    backgroundColor: palette.scrim,
-  },
-  sheet: {
-    gap: 10,
-    paddingHorizontal: 18,
-    paddingTop: 10,
-    paddingBottom: 30,
-    borderTopLeftRadius: 14,
-    borderTopRightRadius: 14,
-    backgroundColor: palette.panel,
-  },
   handle: {
     alignSelf: 'center',
     width: 42,

@@ -12,11 +12,15 @@ const mocks = vi.hoisted(() => {
     activeConnectionId: null as string | null,
     setActiveConnection: vi.fn(() => true),
     refreshActiveHost: vi.fn(async () => undefined),
+    refreshHostInBackground: vi.fn(async (_connectionId: string) => undefined),
   };
   return { push: vi.fn(), state };
 });
 
-vi.mock('expo-router', () => ({ router: { push: mocks.push } }));
+vi.mock('expo-router', async () => {
+  const React = await import('react');
+  return { router: { push: mocks.push }, useFocusEffect: (effect: () => void) => React.useEffect(effect, [effect]) };
+});
 
 vi.mock('react-native', async () => {
   const React = await import('react');
@@ -30,6 +34,7 @@ vi.mock('react-native', async () => {
     Text: host('Text'),
     View: host('View'),
     StyleSheet: { create: (sheet: Record<string, unknown>) => sheet },
+    AppState: { addEventListener: () => ({ remove: () => undefined }) },
   };
 });
 
@@ -66,6 +71,7 @@ beforeEach(() => {
   mocks.push.mockClear();
   mocks.state.setActiveConnection.mockClear();
   mocks.state.refreshActiveHost.mockClear();
+  mocks.state.refreshHostInBackground.mockClear();
   mocks.state.connections = [];
   mocks.state.relayTargets = {};
   mocks.state.activeConnectionId = null;
@@ -176,5 +182,14 @@ describe('DevicesScreen route', () => {
 
     expect(text).toContain('No host is paired yet');
     expect(text).toContain('Pair a host');
+  });
+
+  it('re-reads every host\'s machines whenever the screen comes into view', () => {
+    // A profile added on the host while the app is open must show up here
+    // without a cold restart.
+    mocks.state.connections = [host('home', 'Home'), host('office', 'Office')];
+    mocks.state.relayTargets = { home: [machine('mac')], office: [machine('win')] };
+    render();
+    expect(mocks.state.refreshHostInBackground.mock.calls.map((call) => call[0]).sort()).toEqual(['home', 'office']);
   });
 });

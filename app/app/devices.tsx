@@ -1,6 +1,6 @@
-import { router } from 'expo-router';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { router, useFocusEffect } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AppState, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useOpenCodeMobileStore } from '@/src/store/mobile-store';
@@ -39,6 +39,23 @@ export default function DevicesScreen() {
     setDiscovering(true);
     void store.refreshActiveHost().finally(() => setDiscovering(false));
   }, [store.connections, store.relayTargets, store.activeConnectionId]);
+
+  // A host can gain a profile while the app is open, and a phone app lives for
+  // days in the background. Re-read every host's machine list whenever this
+  // screen comes back into view or the app returns to the foreground, quietly,
+  // so the list never stays at what the host offered when the app started.
+  const latest = useRef(store);
+  latest.current = store;
+  const refreshAllHosts = useCallback(() => {
+    for (const connection of latest.current.connections) void latest.current.refreshHostInBackground(connection.id);
+  }, []);
+  useFocusEffect(refreshAllHosts);
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') refreshAllHosts();
+    });
+    return () => subscription.remove();
+  }, [refreshAllHosts]);
 
   const open = (choice: DeviceChoice) => {
     if (!isDeviceChoiceSelectable(choice)) return;

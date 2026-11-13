@@ -24,6 +24,7 @@ vi.mock('react-native', async () => {
     Text: host('Text'),
     TextInput: host('TextInput'),
     Platform: { OS: 'ios', select: (options: any) => options.ios ?? options.default },
+    KeyboardAvoidingView: host('KeyboardAvoidingView'),
     useWindowDimensions: () => ({ width: 390, height: 844 }),
     View: host('View'),
   };
@@ -32,7 +33,7 @@ vi.mock('react-native', async () => {
 describe('native modal surfaces', () => {
   beforeEach(() => mocks.writeClipboardText.mockReset());
 
-  it('keeps taps inside manual paste from bubbling to the dismiss scrim', async () => {
+  it('keeps the manual paste sheet out of the dismiss scrim, which still closes it', async () => {
     const onClose = vi.fn();
     let screen: ReactTestRenderer | undefined;
     await act(async () => {
@@ -42,10 +43,14 @@ describe('native modal surfaces', () => {
     });
     const stopPropagation = vi.fn();
 
-    screen!.root.findByProps({ testID: 'manual-paste-sheet' }).props.onPress({ stopPropagation });
-
-    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    // The sheet is a sibling of the scrim, not its child, so a click on the sheet
+    // (in a desktop window, a click on its text field) cannot reach the scrim.
+    const scrim = screen!.root.findByProps({ testID: 'manual-paste-sheet-scrim' });
+    expect(scrim.findAll((node) => node.props.testID === 'manual-paste-input')).toHaveLength(0);
+    expect(stopPropagation).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+    scrim.props.onPress();
+    expect(onClose).toHaveBeenCalledTimes(1);
     expect(screen!.root.findByProps({ testID: 'manual-paste-insert' }).props.disabled).toBe(true);
   });
 

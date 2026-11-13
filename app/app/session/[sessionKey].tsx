@@ -24,6 +24,7 @@ import { TranscriptContext } from '@/src/components/opencode/transcript-context'
 import { ModelPickerModal } from '@/src/components/opencode/ModelPickerModal';
 import { QuestionRequestCard } from '@/src/components/opencode/QuestionRequestCard';
 import { PermissionRequestCard } from '@/src/components/opencode/PermissionRequestCard';
+import { SheetModal } from '@/src/components/opencode/SheetModal';
 import { TodoPanel } from '@/src/components/opencode/TodoPanel';
 import { TurnErrorBox } from '@/src/components/opencode/TurnErrorBox';
 import { createTodoBoardModel } from '@/src/ux/todo-board';
@@ -461,6 +462,19 @@ export default function SessionScreen() {
     ],
   );
 
+  const submitRename = async () => {
+    if (!ref || !renameTitle.trim() || renameSubmitting) return;
+    setRenameSubmitting(true);
+    try {
+      await store.renameSession(ref, renameTitle);
+      setRenameVisible(false);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setRenameSubmitting(false);
+    }
+  };
+
   if (!ref) {
     return <RouteError title="Invalid session link" detail="The link does not include a complete relay, machine, and session identity." />;
   }
@@ -854,32 +868,29 @@ export default function SessionScreen() {
               }))}
         />
 
-        <Modal transparent animationType="slide" presentationStyle="overFullScreen" visible={renameVisible} onRequestClose={() => setRenameVisible(false)}>
-          <Pressable style={styles.scrim} onPress={() => setRenameVisible(false)}>
-            <SafeAreaView edges={['bottom']} style={styles.renameSheet} onTouchEnd={(event) => event.stopPropagation()}>
-              <Text style={styles.sheetTitle}>Rename session</Text>
-              <TextInput value={renameTitle} onChangeText={setRenameTitle} testID="rename-session-input" style={styles.renameInput} />
-              <Pressable
-                accessibilityRole="button"
-                testID="rename-session-submit"
-                disabled={!renameTitle.trim() || renameSubmitting}
-                style={[styles.renameButton, (!renameTitle.trim() || renameSubmitting) && styles.disabled]}
-                onPress={async () => {
-                  setRenameSubmitting(true);
-                  try {
-                    await store.renameSession(ref, renameTitle);
-                    setRenameVisible(false);
-                  } catch (error) {
-                    reportError(error);
-                  } finally {
-                    setRenameSubmitting(false);
-                  }
-                }}>
-                <Text style={styles.renameButtonText}>{renameSubmitting ? 'Renaming…' : 'Rename'}</Text>
-              </Pressable>
-            </SafeAreaView>
+        <SheetModal testID="rename-session-sheet" visible={renameVisible} onClose={() => setRenameVisible(false)} style={styles.renameSheet}>
+          <Text style={styles.sheetTitle}>Rename session</Text>
+          <TextInput
+            value={renameTitle}
+            onChangeText={setRenameTitle}
+            testID="rename-session-input"
+            style={styles.renameInput}
+            placeholderTextColor={palette.textMuted}
+            placeholder="Session title"
+            autoFocus
+            selectTextOnFocus
+            returnKeyType="done"
+            onSubmitEditing={() => void submitRename()}
+          />
+          <Pressable
+            accessibilityRole="button"
+            testID="rename-session-submit"
+            disabled={!renameTitle.trim() || renameSubmitting}
+            style={[styles.renameButton, (!renameTitle.trim() || renameSubmitting) && styles.disabled]}
+            onPress={() => void submitRename()}>
+            <Text style={styles.renameButtonText}>{renameSubmitting ? 'Renaming…' : 'Rename'}</Text>
           </Pressable>
-        </Modal>
+        </SheetModal>
 
         {loadState === 'loading' && transcript.length === 0 ? (
           <View pointerEvents="auto" testID="session-loading-blocker" style={styles.loadingBlocker}>
@@ -986,8 +997,7 @@ const styles = StyleSheet.create({
   suggestions: { maxHeight: 110, borderWidth: 1, borderColor: palette.borderSubtle, borderRadius: 7, backgroundColor: palette.backgroundMenu },
   suggestion: { gap: 1, paddingHorizontal: 8, paddingVertical: 5 },
   suggestionTitle: { fontSize: 11, fontWeight: '700', color: palette.text },
-  scrim: { flex: 1, justifyContent: 'flex-end', backgroundColor: palette.scrim },
-  renameSheet: { gap: 9, paddingHorizontal: 14, paddingTop: 14, paddingBottom: 12, backgroundColor: palette.panel },
+  renameSheet: { gap: 9, paddingHorizontal: 14, paddingTop: 14, paddingBottom: 24 },
   sheetTitle: { fontSize: 17, fontWeight: '800', color: palette.text },
   renameInput: { minHeight: 42, paddingHorizontal: 10, borderWidth: 1, borderColor: palette.borderActive, borderRadius: 8, color: palette.text, backgroundColor: palette.backgroundElement },
   renameButton: { minHeight: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 14, borderRadius: 8, backgroundColor: palette.primary },
